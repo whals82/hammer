@@ -1,0 +1,1704 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
+<title>톡쾅</title>
+<meta name="description" content="손이 못을 꽂아 주면 한 박 뒤에 쾅! 원버튼 리듬게임 (가벼운 흑백판)">
+<meta name="theme-color" content="#ffffff">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-title" content="톡쾅">
+<!-- 홈 화면에 추가해서 열면 주소창 없이 꽉 찬 화면으로 열린다 (아이폰은 이 방법으로만 전체화면이 된다) -->
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<link rel="manifest" href="manifest.json">
+<link rel="apple-touch-icon" href="icon-180.png">
+<link rel="icon" type="image/png" sizes="192x192" href="icon-192.png">
+<style>
+html, body { margin: 0; width: 100%; height: 100%; background: #fff; overflow: hidden; }
+body { position: fixed; left: 0; top: 0; touch-action: none; -webkit-user-select: none; user-select: none; -webkit-touch-callout: none; -webkit-tap-highlight-color: transparent; }
+canvas { position: absolute; left: 0; top: 0; display: block; touch-action: none; cursor: pointer; }
+/* 노치·홈 막대가 차지하는 폭을 재는 자 (fit 이 읽는다) */
+#sa { position: fixed; left: 0; top: 0; width: 0; height: 0; visibility: hidden; pointer-events: none; padding: env(safe-area-inset-top, 0px) env(safe-area-inset-right, 0px) env(safe-area-inset-bottom, 0px) env(safe-area-inset-left, 0px); }
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<div id="sa"></div>
+<script>
+/* 톡쾅 — 가벼운 흑백 리듬게임 (파일 하나로 끝난다)
+ *
+ * 놀이: 오른쪽의 손이 흘러가는 판자에 못을 꽂는다("틱"). 판자는 한 박에 한 칸씩 왼쪽으로 흐르고,
+ *       꽂힌 못이 한 박 뒤 망치 밑 동그라미에 오는 순간 화면을 눌러 내리친다("쾅"). 듣는 마디와 치는 마디를 따로 나누지 않는다.
+ * 부수기 모드: 박자와 상관없이 마구 눌러 나무 바닥을 부수며 내려간다. 30초 동안 얼마나 깊이 가는지 겨룬다.
+ *
+ * 느린 휴대폰에서도 끊기지 않게 하려고 지키는 것:
+ *  - 화면은 캔버스 한 장에 직접 그린다. 플레이 중에는 DOM·SVG·CSS 효과를 건드리지 않고, 글꼴·이미지도 내려받지 않는다
+ *  - 소리는 시작할 때 미리 만들어 둔 짧은 녹음(버퍼)을 틀기만 한다. 반주는 네 마디짜리 녹음 하나를 되풀이한다
+ *  - 못·손·망치의 위치는 모두 "지금 들리는 소리가 몇 박째인가"로만 계산한다. 화면이 잠깐 밀려도 박자와 어긋나지 않는다
+ */
+(function () {
+  'use strict';
+
+  /* ---------- 기본 ---------- */
+  let W = 1280, H = 720;                                 // 그릴 때 쓰는 좌표: 가로 화면 1280×720, 세로 화면 720×1280 (layout 이 정한다)
+  const TEST = /[?&]test\b/.test(location.search);       // 자동 검증용: 소리를 끄고, 창이 가려져도 돌게 타이머로 돌린다
+  const SHOWFPS = /[?&]fps\b/.test(location.search);     // 주소 뒤에 ?fps 를 붙이면 플레이 중에 초당 화면 수를 보여 준다
+  const TOUCH = 'ontouchstart' in window || navigator.maxTouchPoints > 0;
+  /* 고정 주소(깃허브 페이지)에서는 브라우저가 예전 파일을 10분쯤 기억할 수 있다. 그래서 열릴 때 version.txt 를 새로 받아 보고,
+   * 지금 파일(BUILD)보다 새 판이 올라와 있으면 주소 뒤에 ?v=새번호 를 붙여 한 번 다시 연다.
+   * BUILD 는 올릴 때 tools/deploy.py 가 채운다. 내 컴퓨터에서 열 때는 'dev' 그대로라 아무 일도 하지 않는다 */
+  const BUILD = '20261115-182536';
+  if (BUILD !== 'dev' && !TEST && window.fetch) {
+    fetch('version.txt?' + Date.now(), { cache: 'no-store' }).then((r) => (r.ok ? r.text() : '')).then((v) => {
+      v = v.trim();
+      const q = new URLSearchParams(location.search);
+      if (!v || v === BUILD || q.get('v') === v) return;                     // 같은 판이거나, 이미 그 번호로 다시 열어 본 뒤면 그만둔다
+      q.set('v', v);
+      location.replace(location.pathname + '?' + q.toString() + location.hash);
+    }).catch(() => null);
+  }
+  const INK = '#111', PAPER = '#fff', GRAY = '#8a8a8a', LIGHT = '#dcdcdc';
+  const FONT = "-apple-system, BlinkMacSystemFont, 'Apple SD Gothic Neo', 'Malgun Gothic', 'Noto Sans KR', sans-serif";
+  const cv = document.getElementById('c');
+  const g = cv.getContext('2d', { alpha: false });
+  const lerp = (a, b, u) => a + (b - a) * u;
+  const clamp = (u) => (u < 0 ? 0 : u > 1 ? 1 : u);
+  const easeOut = (u) => 1 - (1 - u) * (1 - u);
+
+  const KEY = 'tokkwang.v2';                             // (v1 의 소리 끔 설정이 남아 소리가 안 나는 일이 없도록 새 이름으로 저장한다)
+  const store = { best: {}, offset: 0, mute: false, hammer: 'basic', view: 'land', smash: {} };   // view: 'land' 가로 화면 / 'port' 세로 화면, smash: 부수기 모드의 망치별 최고 깊이
+  try { Object.assign(store, JSON.parse(localStorage.getItem(KEY) || '{}')); } catch (e) { /* 저장을 못 쓰는 브라우저 */ }
+  const save = () => { try { localStorage.setItem(KEY, JSON.stringify(store)); } catch (e) { /* 무시 */ } };
+
+  /* ---------- 소리 ----------
+   * 모든 소리를 숫자 계산으로 한 번만 만들어 버퍼에 담아 두고, 필요할 때 그 버퍼를 튼다. */
+  const Au = (function () {
+    let ctx = null, master = null, bus = null, wrapLen = 0;
+    const B = {};
+
+    // 되풀이 녹음을 만들 때는(wrapLen) 끝을 넘어가는 소리가 앞으로 돌아와 이어진다
+    function put(d, i, v) { if (i < d.length) d[i] += v; else if (wrapLen && i - wrapLen < d.length) d[i - wrapLen] += v; }
+    // 음 하나: f0 에서 f1 로 미끄러지며 사그라든다. shape 0 사인, 1 사각, 2 삼각. pw 가 클수록 빨리 사그라든다
+    function tone(d, sr, at, dur, f0, f1, amp, shape, pw) {
+      const i0 = Math.round(at * sr), n = Math.round(dur * sr), atk = 0.002 * sr, sweep = f1 !== f0, ratio = f1 / f0, p = pw || 2;
+      let ph = 0;
+      for (let i = 0; i < n; i++) {
+        const u = i / n;
+        ph += (6.283185307 * (sweep ? f0 * Math.pow(ratio, u) : f0)) / sr;
+        let s = Math.sin(ph);
+        if (shape === 1) s = s > 0 ? 0.55 : -0.55; else if (shape === 2) s = 0.6366 * Math.asin(s);
+        put(d, i0 + i, s * (i < atk ? i / atk : 1) * Math.pow(1 - u, p) * amp);
+      }
+    }
+    // 소음: bright 면 높은 소리("칫"), 아니면 둔한 소리("퍽")
+    function hiss(d, sr, at, dur, amp, bright) {
+      const i0 = Math.round(at * sr), n = Math.round(dur * sr);
+      let prev = 0;
+      for (let i = 0; i < n; i++) {
+        const u = i / n, w = Math.random() * 2 - 1;
+        put(d, i0 + i, (bright ? (w - prev) * 0.7 : (w + prev) * 0.5) * (1 - u) * (1 - u) * amp);
+        prev = w;
+      }
+    }
+    function make(dur, fn) {
+      const sr = ctx.sampleRate, b = ctx.createBuffer(1, Math.max(1, Math.round(dur * sr)), sr), d = b.getChannelData(0);
+      fn(d, sr);
+      for (let i = 0; i < d.length; i++) d[i] = Math.tanh(d[i]);            // 넘치는 소리는 눌러 담는다 (타격음이 더 단단해진다)
+      return b;
+    }
+    function makeSounds() {
+      // 틱: 손이 못을 꽂는 소리. 맑고 짧다
+      B.tik = make(0.08, (d, sr) => { tone(d, sr, 0, 0.035, 2300, 1900, 0.5); tone(d, sr, 0, 0.05, 940, 820, 0.35, 2); hiss(d, sr, 0, 0.008, 0.45, 1); });
+      // 쾅: 맨 앞의 "딱" + 아주 낮은 울림 + 나무 "턱" + 쇠 "챙"
+      const bang = (d, sr, v, ring) => {
+        hiss(d, sr, 0, 0.006, 0.9 * v, 1);
+        hiss(d, sr, 0, 0.03, 0.5 * v, 1);                                    // 갈라지는 "짝"
+        tone(d, sr, 0, 0.3, 165, 36, 1.15 * v, 0, 1.6);
+        tone(d, sr, 0, 0.1, 330, 190, 0.55 * v, 2);
+        tone(d, sr, 0, 0.05, 640, 300, 0.4 * v, 2);                          // 나무 "톡"
+        hiss(d, sr, 0, 0.06, 0.5 * v, 0);
+        tone(d, sr, 0, 0.14, 2140, 2140, 0.13 * ring, 0, 3); tone(d, sr, 0, 0.11, 3270, 3270, 0.09 * ring, 0, 3); tone(d, sr, 0, 0.08, 4490, 4490, 0.05 * ring, 0, 3);
+      };
+      B.hitP = make(0.42, (d, sr) => { bang(d, sr, 1, 1); tone(d, sr, 0.012, 0.36, 1568, 1568, 0.16, 0, 3); tone(d, sr, 0.012, 0.3, 2349, 2349, 0.1, 0, 3); });   // 완벽: "딩"이 얹힌다
+      B.hitG = make(0.32, (d, sr) => bang(d, sr, 0.8, 0.7));
+      B.bad = make(0.26, (d, sr) => { hiss(d, sr, 0, 0.05, 0.4, 0); tone(d, sr, 0, 0.09, 240, 150, 0.6, 2); tone(d, sr, 0.04, 0.2, 380, 640, 0.22, 0, 1.5); });
+      B.whiff = make(0.16, (d, sr) => { hiss(d, sr, 0, 0.09, 0.3, 1); tone(d, sr, 0.02, 0.12, 120, 70, 0.6, 2); hiss(d, sr, 0.02, 0.05, 0.35, 0); });
+      // 5파운드 해머의 한 방: 더 낮고 길게 울린다
+      B.boom = make(0.62, (d, sr) => { bang(d, sr, 1.15, 1); tone(d, sr, 0, 0.55, 110, 30, 0.9, 0, 1.3); hiss(d, sr, 0, 0.14, 0.45, 0); tone(d, sr, 0.012, 0.36, 1568, 1568, 0.12, 0, 3); });
+      // 판자가 깨지는 소리: 쩍 갈라지고 우두둑 부서진다
+      B.crack = make(0.5, (d, sr) => {
+        hiss(d, sr, 0, 0.02, 1, 1); hiss(d, sr, 0.01, 0.2, 0.9, 0); tone(d, sr, 0, 0.26, 140, 40, 1, 0, 1.5); tone(d, sr, 0.02, 0.12, 520, 180, 0.4, 1, 2);
+        for (let k = 0; k < 7; k++) hiss(d, sr, 0.04 + k * 0.032 + Math.random() * 0.012, 0.014, 0.65 - k * 0.06, 1);
+      });
+      // 뿅망치
+      B.pyong = make(0.28, (d, sr) => { tone(d, sr, 0, 0.11, 520, 1500, 0.5, 0, 1.2); tone(d, sr, 0.1, 0.15, 1500, 900, 0.4, 0, 1.5); tone(d, sr, 0, 0.05, 260, 130, 0.5, 2); });
+      // 시작 전에 세는 북채 소리
+      B.stick = make(0.05, (d, sr) => { hiss(d, sr, 0, 0.012, 0.6, 1); tone(d, sr, 0, 0.035, 1250, 1100, 0.45, 2); });
+      B.stickHi = make(0.05, (d, sr) => { hiss(d, sr, 0, 0.012, 0.6, 1); tone(d, sr, 0, 0.035, 1700, 1500, 0.5, 2); });
+      B.combo = make(0.5, (d, sr) => { [783.99, 987.77, 1174.66, 1567.98].forEach((f, i) => tone(d, sr, i * 0.05, 0.3, f, f, 0.2, 2, 2.5)); });
+      B.end = make(1.0, (d, sr) => { [440, 554.37, 659.25, 880, 1108.73].forEach((f, i) => { tone(d, sr, i * 0.08, 0.6, f, f, 0.26, 2, 2.2); tone(d, sr, i * 0.08, 0.3, f * 2, f * 2, 0.08); }); });
+      B.ui = make(0.05, (d, sr) => { tone(d, sr, 0, 0.04, 1320, 1100, 0.3, 2); hiss(d, sr, 0, 0.006, 0.2, 1); });
+    }
+    /* 네 마디(열여섯 박)짜리 반주 한 바퀴: 북(쿵·탁·칫), 베이스, 엇박 건반, 짧은 가락. 마디마다 화음이 바뀐다.
+     * 박 길이는 녹음 길이(표본 수)에서 거꾸로 구해 돌려준다. 그 값으로 박자를 세면 몇 바퀴를 돌아도 어긋나지 않는다 */
+    function makeLoop(bpm, tr) {
+      const sr = ctx.sampleRate, len = Math.round(((16 * 60) / bpm) * sr), spb = len / sr / 16;
+      const b = ctx.createBuffer(1, len, sr), d = b.getChannelData(0);
+      const st = (n) => Math.pow(2, n / 12), R = 110 * st(tr || 0);          // 으뜸음
+      const chord = [0, -3, 5, 7], minor = [false, true, false, false];      // 마디마다 으뜸·버금딸림(단조)·딸림 쪽으로 옮겨 간다
+      wrapLen = len;
+      for (let bar = 0; bar < 4; bar++) {
+        const o = bar * 4, root = R * st(chord[bar]), third = root * st(minor[bar] ? 3 : 4), fifth = root * st(7);
+        [0, 1.5, 2].forEach((bt) => tone(d, sr, (o + bt) * spb, 0.2, 140, 44, 0.85, 0, 1.6));                     // 쿵
+        if (bar === 3) tone(d, sr, (o + 3.5) * spb, 0.16, 140, 50, 0.6, 0, 1.6);
+        [1, 3].forEach((bt) => { hiss(d, sr, (o + bt) * spb, 0.13, 0.42, 0); hiss(d, sr, (o + bt) * spb, 0.03, 0.4, 1); tone(d, sr, (o + bt) * spb, 0.07, 210, 170, 0.3, 2); });   // 탁
+        for (let k = 0; k < 8; k++) hiss(d, sr, (o + k / 2) * spb, k % 2 ? 0.02 : 0.03, k % 2 ? 0.09 : 0.15, 1);   // 칫칫
+        const bass = (bt, f, v, dur) => tone(d, sr, (o + bt) * spb, dur || Math.min(0.3, spb * 0.8), f, f, 0.34 * (v || 1), 2, 1.3);
+        bass(0, root); bass(1, root * 2, 0.7, 0.12); bass(1.5, root, 0.9); bass(2.5, fifth, 0.8); bass(3, root * 2, 0.7, 0.12); bass(3.5, bar === 3 ? fifth * st(2) : fifth, 0.8);
+        [0.5, 1.5, 2.5, 3.5].forEach((bt) => [root * 2, third * 2, fifth * 2].forEach((f) => tone(d, sr, (o + bt) * spb, 0.11, f, f, 0.055, 0, 1.5)));   // 건반
+      }
+      const lead = (bt, n, v) => { const f = R * 4 * st(n); tone(d, sr, bt * spb, 0.22, f, f, 0.1 * (v || 1), 0, 2.5); tone(d, sr, bt * spb, 0.05, f * 4, f * 4, 0.03); };
+      lead(6, 7); lead(6.5, 9); lead(7, 12); lead(7.5, 9, 0.8);              // 둘째 마디 끝의 물음
+      lead(14, 12); lead(14.5, 9); lead(15, 7); lead(15.5, 4, 0.8);          // 넷째 마디 끝의 대답
+      wrapLen = 0;
+      for (let i = 0; i < len; i++) d[i] = Math.tanh(d[i] * 0.8);
+      return { buffer: b, spb };
+    }
+    let probe = null, tag = null;
+    function newBus() {
+      if (bus) { try { bus.disconnect(); } catch (e) { /* 이미 끊김 */ } }
+      bus = ctx.createGain();
+      bus.connect(master);
+      if (probe) bus.connect(probe);
+    }
+    function ensure() {
+      if (ctx) return true;
+      const AC = window.AudioContext || window.webkitAudioContext;
+      if (!AC) return false;
+      try { if (navigator.audioSession) navigator.audioSession.type = 'playback'; } catch (e) { /* 아이폰: 무음 스위치가 켜져 있어도 소리가 나게 */ }
+      try { ctx = new AC({ latencyHint: 'interactive' }); } catch (e) { ctx = new AC(); }
+      ctx.onstatechange = () => { dirty = true; };                           // 소리 장치가 켜지고 꺼지면 메뉴의 상태 글을 다시 그린다
+      master = ctx.createGain();
+      master.gain.value = store.mute || TEST ? 0 : 0.9;
+      try {                                                                  // 반주와 타격음이 겹쳐 소리가 넘치면 눌러 준다 (찢어지는 소리 방지)
+        const comp = ctx.createDynamicsCompressor();
+        comp.threshold.value = -10; comp.knee.value = 10; comp.ratio.value = 8; comp.attack.value = 0.003; comp.release.value = 0.12;
+        master.connect(comp);
+        comp.connect(ctx.destination);
+      } catch (e) { master.connect(ctx.destination); }
+      newBus();
+      makeSounds();
+      return true;
+    }
+    /* 예전 아이폰(audioSession 이 없는 iOS)은 무음 스위치가 켜져 있으면 웹 오디오가 안 들린다.
+     * 소리 없는 <audio> 를 틀어 두면 "매체 재생"으로 바뀌어 들린다. 아이폰·아이패드에서만, 한 번만 한다 */
+    function silentTag() {
+      const ios = /iP(hone|ad|od)/.test(navigator.userAgent) || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
+      if (tag || TEST || !ios || navigator.audioSession) return;
+      try {
+        const n = 8000, buf = new ArrayBuffer(44 + n), v = new DataView(buf);
+        const str = (o, s) => { for (let i = 0; i < s.length; i++) v.setUint8(o + i, s.charCodeAt(i)); };
+        str(0, 'RIFF'); v.setUint32(4, 36 + n, true); str(8, 'WAVEfmt '); v.setUint32(16, 16, true); v.setUint16(20, 1, true); v.setUint16(22, 1, true);
+        v.setUint32(24, 8000, true); v.setUint32(28, 8000, true); v.setUint16(32, 1, true); v.setUint16(34, 8, true); str(36, 'data'); v.setUint32(40, n, true);
+        for (let i = 0; i < n; i++) v.setUint8(44 + i, 128);                 // 8비트 무음
+        tag = document.createElement('audio');
+        tag.src = URL.createObjectURL(new Blob([buf], { type: 'audio/wav' }));
+        tag.loop = true;
+        tag.setAttribute('playsinline', '');
+        tag.setAttribute('x-webkit-airplay', 'deny');
+        const p = tag.play();
+        if (p && p.catch) p.catch(() => { tag = null; });
+      } catch (e) { tag = null; }
+    }
+    return {
+      makeLoop,
+      unlock() {                                                             // 누르기·떼기·클릭 때마다 부른다: 소리 장치는 사람이 화면을 건드린 순간에만 켤 수 있다
+        if (!ensure()) return;
+        silentTag();
+        if (ctx.state === 'running') return;
+        ctx.resume();
+        try {                                                                // 예전 아이폰은 이때 소리를 하나 틀어 줘야 깨어난다 (소리 없는 한 점짜리)
+          const s = ctx.createBufferSource();
+          s.buffer = ctx.createBuffer(1, 1, 22050);
+          s.connect(ctx.destination);
+          s.start(0);
+        } catch (e) { /* 무시 */ }
+      },
+      at(name, t, vol) {                                                     // 정해진 시각에 한 번 (t 가 없으면 지금)
+        if (!ctx) return;
+        const s = ctx.createBufferSource();
+        s.buffer = B[name];
+        if (vol != null) { const gn = ctx.createGain(); gn.gain.value = vol; s.connect(gn); gn.connect(bus); } else s.connect(bus);
+        s.start(t || 0);
+      },
+      loop(buffer, t, tEnd) {                                                // 반주: 타격음보다 작게 깐다
+        const s = ctx.createBufferSource(), gn = ctx.createGain();
+        gn.gain.value = 0.7;
+        s.buffer = buffer; s.loop = true;
+        s.connect(gn); gn.connect(bus);
+        s.start(t); s.stop(tEnd);
+      },
+      hush() { if (ctx) newBus(); },                                         // 예약해 둔 소리를 모두 끊는다
+      setMute(m) { if (master) master.gain.value = m || TEST ? 0 : 0.9; },
+      now() { return ctx.currentTime; },
+      latency() { return ctx.outputLatency || ctx.baseLatency || (TOUCH ? 0.02 : 0); },
+      suspend() { if (ctx) ctx.suspend(); },
+      resume() { if (ctx) ctx.resume(); },
+      get state() { return ctx ? ctx.state : 'none'; },
+      level() {                                                              // 검증용: 지금 흘러나가는 소리의 세기 (스피커로는 내지 않고 잰다)
+        if (!ensure()) return -1;
+        if (!probe) { probe = ctx.createAnalyser(); probe.fftSize = 2048; bus.connect(probe); }
+        const d = new Float32Array(probe.fftSize);
+        probe.getFloatTimeDomainData(d);
+        let pk = 0;
+        for (let i = 0; i < d.length; i++) { const a = d[i] < 0 ? -d[i] : d[i]; if (a > pk) pk = a; }
+        return +pk.toFixed(3);
+      },
+      info() {                                                              // 검증용: 만들어 둔 소리마다 길이·가장 큰 값·평균 세기
+        if (!ensure()) return null;
+        const stat = (b) => { const d = b.getChannelData(0); let pk = 0, sq = 0, bad = 0; for (let i = 0; i < d.length; i++) { const v = d[i]; if (v !== v) bad++; const a = v < 0 ? -v : v; if (a > pk) pk = a; sq += v * v; } return [+(d.length / b.sampleRate).toFixed(3), +pk.toFixed(2), +Math.sqrt(sq / d.length).toFixed(3), bad]; };
+        const out = {};
+        Object.keys(B).forEach((k) => { out[k] = stat(B[k]); });
+        const lp = makeLoop(100, 0);
+        out.loop100 = stat(lp.buffer).concat(+lp.spb.toFixed(5));
+        return out;
+      },
+      get ctx() { return ctx; },
+      get running() { return !!ctx && ctx.state === 'running'; }
+    };
+  })();
+
+  /* ---------- 스테이지 ----------
+   * 한 마디는 문자열 하나. 띄어 쓴 네 묶음이 1·2·3·4박이고, 묶음 안의 글자 수만큼 그 박을 똑같이 나눈다. x = 손이 못을 꽂는 자리, - = 쉼.
+   *   'x' 정박 / 'xx' 반 박 둘 / '-x' 엇박 / 'xxx' 셋잇단 / 'xx--' 반의 반 박 둘.   꽂은 못은 언제나 정확히 한 박 뒤에 친다 */
+  const HOW = TOUCH ? '화면을 톡' : '스페이스';
+  const STAGES = [
+    { id: 'p', name: '연습', sub: '천천히 배우기', bpm: 88, tr: 0, practice: true,
+      bars: ['x - x -', 'x - x -', 'x - - -', 'xx - x -', 'x - xx -', 'xx - xx -'],
+      caps: ['손이 못을 꽂으면("틱") 한 박 뒤에 쾅!', '못이 망치 밑 동그라미에 오는 순간 ' + HOW, '하나만 올 때도 있어요', '빨리 두 개를 꽂으면, 똑같이 빨리 두 번', '틱, 틱틱 → 쾅, 쾅쾅', '잘했어요! 다음은 1단계'] },
+    { id: 's1', name: '1단계', sub: '또박또박', bpm: 100, tr: 0,
+      bars: ['x - x -', 'x - x -', 'xx - x -', 'x - xx -', 'x - x -', 'xx - xx -', 'x - x -', 'xx - xx -',
+        'x - - -', 'xx - x -', 'x - xx -', 'xx - xx -', 'x - x -', 'xx - xx -', 'xx - xx -', 'x - - -'] },
+    { id: 's2', name: '2단계', sub: '이어 치기', bpm: 112, tr: 3,
+      bars: ['x - x -', 'x x - -', 'x x x -', 'xx - x -', '-x - x -', 'x x x x', '- - xx -', '-x - -x -',
+        'x x xx -', 'xx - xx -', 'x -x x -', 'x x x x', 'xx x - -', '-x -x - -', 'x x xx -', 'x - - -'] },
+    { id: 's3', name: '3단계', sub: '잰걸음', bpm: 126, tr: 5,
+      bars: ['xx - xx -', 'x x x x', 'xxx - x -', 'x - xxx -', 'xx-- - x -', 'x x xx xx', '-x x -x x', 'xxx - xxx -',
+        'xx xx - -', 'x -x xx -', 'xx-- - xx-- -', 'x x x xx', 'xxx x xxx -', '-x -x -x -', 'xx xx xx -', 'x - - -'] },
+    { id: 's4', name: '4단계', sub: '불망치', bpm: 140, tr: 7,
+      bars: ['x x x x', 'xx - xx -', 'xx x xx x', 'xxx - xxx -', '-x -x x x', 'xx xx - xx', 'x xxx x -', 'xx-- x xx-- x',
+        '-x xx -x xx', 'xxx xxx - -', 'x x xx xx', 'xx -x xx -x', 'xxx x xx x', 'xx xx xx -', 'xxx xxx xxx -', 'x - - -'] }
+  ];
+  const stageById = (id) => (id === 'smash' ? SMASH : STAGES.filter((s) => s.id === id)[0]);   // 'smash' = 부수기 모드
+  function parse(bar) {                                  // 한 마디 → 못을 꽂는 박 위치들
+    const out = [];
+    bar.split(' ').forEach((grp, beat) => { for (let k = 0; k < grp.length; k++) if (grp[k] === 'x') out.push(beat + k / grp.length); });
+    return out;
+  }
+
+  /* ---------- 망치 ----------
+   * 스테이지에 합격하면(need) 새 망치가 열린다.
+   * win = 판정 폭의 배수(클수록 맞히기 쉽다), pow = 흔들림과 파편의 세기, crack = 잘못 쳤을 때 판자가 상하는 정도(0 멀쩡, 1 금이 간다, 2 박살 난다),
+   * smash = 부수기 모드에서 한 번 칠 때 판자를 깎는 힘(판자 한 장의 단단함은 6) */
+  const HAMMERS = [
+    { id: 'basic', name: '기본 망치', desc: '손에 익은\n보통 망치', win: 1, pow: 1, crack: 0, need: null, smash: 3 },
+    { id: 'slim', name: '좁은 망치', desc: '머리가 좁아서\n정확히 쳐야 해요', win: 0.75, pow: 0.8, crack: 0, need: 's1', smash: 2 },
+    { id: 'big', name: '큰 망치', desc: '맞히기 쉬워요.\n잘못 치면 금이 쩍!', win: 1.3, pow: 1.3, crack: 1, need: 's2', smash: 4 },
+    { id: 'sledge', name: '5파운드 해머', desc: '묵직한 한 방!\n잘못 치면 판자가 박살', win: 1, pow: 1.9, crack: 2, need: 's3', smash: 6 },
+    { id: 'toy', name: '뿅망치', desc: '뿅! 소리가 나는\n장난감 망치', win: 1.15, pow: 0.7, crack: 0, need: 's4', smash: 1 }
+  ];
+  const unlocked = (h) => !h.need || (!!store.best[h.need] && store.best[h.need].grade !== 'F');
+  const rawHammer = (id) => HAMMERS.filter((h) => h.id === id)[0] || HAMMERS[0];
+  const hammerById = (id) => { const h = rawHammer(id); return unlocked(h) ? h : HAMMERS[0]; };   // 아직 안 열린 망치면 기본 망치
+
+  /* ---------- 한 판 ---------- */
+  const INTRO = 4;                                       // 시작 전에 세는 박
+  const TAIL = 2;                                        // 마지막 마디 뒤의 여유
+  const OUTRO = 2.5;                                     // 끝나고 결과 화면까지
+  const LAG = 1;                                         // 꽂은 뒤 몇 박 뒤에 치는가
+  const WIN = { perfect: 0.055, good: 0.11, bad: 0.17 }; // 판정 폭(초)
+  const PTS = { perfect: 100, good: 60, bad: 20, miss: 0 };
+  const MILES = [10, 20, 30, 50, 75, 100];
+  // 배치: 판자는 한 박에 D 만큼 왼쪽으로 흐른다. 손은 PX 에서 꽂고, 망치는 그보다 한 박 거리 왼쪽인 SX 를 내리친다
+  const BH = 120;                                        // 판자 두께
+  const NH = 110;                                        // 서 있는 못의 길이
+  const UPA = -0.62;                                   // 망치를 들고 있는 각도
+  const DOWNA = { perfect: 0, good: -0.065, bad: -0.125, whiff: 0.025 };   // 내리친 각도: 덜 박을수록 덜 내려간다
+  const REST = 150;                                      // 손이 쉬는 높이
+  /* 가로 화면과 세로 화면은 자리가 다르다. layout(세로인가)이 한꺼번에 정한다 (fit 이 부른다).
+   * 세로 화면은 폭이 좁아서 한 박 거리(D)를 조금 줄이고, 장면을 가운데보다 위에 두어 아래쪽을 엄지가 누를 자리로 비운다 */
+  let PORT = false;                                      // 지금 세로 화면 배치인가
+  let PY, SX, D, PX, TILE, HPX, HPY, MIDX, PBX, PBY;
+  function layout(port) {
+    PORT = port;
+    W = port ? 720 : 1280;
+    H = port ? 1280 : 720;
+    PY = port ? 780 : 500;                               // 판자 윗면
+    SX = port ? 220 : 380;                               // 망치가 내리치는 자리
+    D = port ? 320 : 380;                                // 한 박에 판자가 흐르는 거리
+    PX = SX + D * LAG;                                   // 손이 못을 꽂는 자리
+    TILE = D * 2;                                        // 나뭇결이 되풀이되는 폭
+    HPX = SX - 400;                                      // 망치 자루 끝(도는 축)
+    HPY = PY - 14 - 94;
+    MIDX = port ? 360 : 560;                             // 점수·큰 글자의 가운데 (가로 화면은 망치와 손 사이의 빈 자리)
+    PBX = port ? 24 : 1160;                              // 멈춤 단추: 가로 화면은 오른쪽 아래, 세로 화면은 엄지가 닿지 않는 왼쪽 위
+    PBY = port ? 24 : 640;
+  }
+  layout(store.view === 'port');
+
+  let S = null;                                          // 지금 판
+  let screen = 'title', dirty = true, newBest = false, menuAt = 0;
+
+  function botErr(bot) {
+    return bot === 'good' ? (Math.random() < 0.5 ? -0.08 : 0.08) : bot === 'late' ? 0.13 : bot === 'later' ? 0.18 : bot === 'sloppy' ? (Math.random() * 2 - 1) * 0.16 : 0;
+  }
+
+  /* 판을 차린다. opt.virtual = 화면·소리 없이 계산으로만 돌릴 때, opt.bot = 자동으로 치는 손(perfect|good|late|sloppy|none) */
+  function begin(stage, opt) {
+    if (stage.smash) { beginSmash(stage, opt); return; } // 부수기 모드는 판 차림이 따로 있다
+    opt = opt || {};
+    if (Au.ctx) Au.hush();
+    const audio = !opt.virtual && Au.running;
+    let spb = 60 / stage.bpm, loop = null;
+    if (audio) { loop = Au.makeLoop(stage.bpm, stage.tr); spb = loop.spb; }
+    const notes = [];
+    stage.bars.forEach((bar, i) => parse(bar).forEach((tb) => {
+      const cb = INTRO + i * 4 + tb;
+      notes.push({ cue: cb * spb, hit: (cb + LAG) * spb, q: null, dir: 1, err: botErr(opt.bot) });
+    }));
+    const hm = opt.hammer ? rawHammer(opt.hammer) : hammerById(store.hammer);   // 이번 판에 쓸 망치
+    S = {
+      hm, win: { perfect: WIN.perfect * hm.win, good: WIN.good * hm.win, bad: WIN.bad * hm.win }, marks: [], scareAt: -9, hopAt: -9, broken: 0,
+      stage, spb, notes, bars: stage.bars.length, end: INTRO + stage.bars.length * 4 + TAIL, practice: !!stage.practice,
+      virtual: !!opt.virtual, bot: opt.bot || null, audio, t0: 0, base: 0, frozen: null, paused: false, done: false, ended: false,
+      lo: 0, sched: 0, ci: 0, vis: 0, score: 0, max: stage.practice ? 0 : notes.length * 100, combo: 0, maxCombo: 0, comboAt: -9,
+      counts: { perfect: 0, good: 0, bad: 0, miss: 0 }, whiffs: 0, presses: 0,
+      fx: [], strike: null, shakeAt: -9, shakeAmp: 0, zoom: 0, dipAt: -9, dipAmp: 0, res: null
+    };
+    if (audio) {
+      S.t0 = Au.now() + 0.3;                                                 // 0박이 울리는 소리 시계 시각
+      for (let k = 0; k < 4; k++) Au.at(k === 3 ? 'stickHi' : 'stick', S.t0 + k * spb);
+      Au.loop(loop.buffer, S.t0 + INTRO * spb, S.t0 + S.end * spb);
+      Au.at('end', S.t0 + S.end * spb);
+    } else if (!opt.virtual) S.base = performance.now() / 1000 + 0.3;
+  }
+
+  /* 지금 들리는 소리가 0박에서 몇 초 지났는가 */
+  function now() {
+    if (S.frozen != null) return S.frozen;
+    return S.audio ? Au.now() - Au.latency() - store.offset / 1000 - S.t0 : performance.now() / 1000 - S.base;
+  }
+  /* 곧 나올 "틱"을 미리 예약한다 */
+  function schedule() {
+    if (!S.audio) return;
+    const horizon = Au.now() + 1.2;
+    while (S.sched < S.notes.length && S.t0 + S.notes[S.sched].cue < horizon) Au.at('tik', S.t0 + S.notes[S.sched++].cue, 1.25);
+  }
+  const sfx = (name, vol) => { if (S.audio) Au.at(name, 0, vol); };
+  const buzz = (ms) => { if (!S.virtual && !S.bot && navigator.vibrate) { try { navigator.vibrate(ms); } catch (e) { /* 무시 */ } } };
+
+  function breakCombo(t) {
+    if (S.combo >= 10) S.fx.push({ type: 2, str: '콤보 끊김', t, life: 0.7, c: GRAY });
+    S.combo = 0;
+  }
+  function chips(t, n) {                                 // 튀는 나뭇조각
+    if (lite) n = Math.ceil(n / 2);
+    const parts = [];
+    for (let k = 0; k < n; k++) parts.push({ vx: (Math.random() - 0.5) * 760, vy: -(260 + Math.random() * 420), rot: (Math.random() - 0.5) * 30, a: Math.random() * 3 });
+    S.fx.push({ type: 3, t, life: 0.55, parts });
+  }
+  /* 무거운 망치로 잘못 쳤다: 판자에 금이 가거나(1) 박살 난다(2). 자국은 판자에 남아 함께 흘러간다 */
+  function wreck(t, level) {
+    const pts = [];                                      // 깨진 자리의 들쭉날쭉한 모양 (칠 때마다 다르다)
+    for (let k = 0; k < 9; k++) pts.push(Math.random());
+    S.marks.push({ t, level, pts });
+    S.shakeAt = t;
+    S.dipAt = t;
+    if (level > 1) {
+      const parts = [];
+      for (let k = 0; k < (lite ? 5 : 9); k++) parts.push({ vx: (Math.random() - 0.5) * 900, vy: -(300 + Math.random() * 560), rot: (Math.random() - 0.5) * 22, a: Math.random() * 3, w: 16 + Math.random() * 26, h: 8 + Math.random() * 10 });
+      S.fx.push({ type: 7, t, life: 0.8, parts }, { type: 6, str: '우지끈!', t, life: 0.6, size: 92 });
+      S.shakeAmp = 20; S.zoom = 0.05; S.dipAmp = 22;
+      S.scareAt = t;                                     // 손이 깜짝 놀란다
+      S.broken++;
+      sfx('crack'); buzz(40);
+    } else {
+      S.fx.push({ type: 6, str: '쩍!', t, life: 0.45, size: 72 });
+      S.shakeAmp = 9; S.zoom = 0.015; S.dipAmp = 10;
+      sfx('crack', 0.55); buzz(20);
+    }
+  }
+  function judge(n, q, t) {
+    for (let k = S.fx.length - 1; k >= 0; k--) if (S.fx[k].type === 0 || S.fx[k].type === 6) S.fx.splice(k, 1);   // 앞 판정 글자가 남아 있으면 지운다 (빠른 못에서 글자가 겹치지 않게)
+    const h = S.hm, toy = h.id === 'toy', heavy = h.id === 'sledge';
+    n.q = q;
+    n.dir = t >= n.hit ? 1 : -1;                         // 늦게 치면 오른쪽으로, 빨리 치면 왼쪽으로 기운다
+    if (!S.practice) { S.counts[q]++; S.score += PTS[q]; }
+    if (q === 'miss') {
+      breakCombo(t);
+      S.fx.push({ type: 0, str: '놓침', t, life: 0.5, size: 40, c: GRAY });
+      return;
+    }
+    S.strike = { t, q, seen: false, at: 0 };
+    S.shakeAt = t;
+    S.dipAt = t;
+    const side = n.dir > 0 ? '늦음' : '빠름';
+    if (q === 'perfect') {
+      S.shakeAmp = 13 * h.pow; S.zoom = 0.04 * Math.min(1.5, h.pow); S.dipAmp = 12 * h.pow;
+      sfx(toy ? 'pyong' : heavy ? 'boom' : 'hitP'); buzz(18);
+      S.fx.push({ type: 1, under: true, t, life: 0.13, r: 150 * (0.7 + 0.3 * h.pow), rot: Math.random() * 6 }, { type: 5, under: true, t, life: 0.12, rot: Math.random() * 6 },
+        { type: 4, under: true, t, life: 0.3 }, { type: 6, str: toy ? '뿅!' : heavy ? '콰앙!' : '쾅!', t, life: 0.42, size: heavy ? 122 : 104 }, { type: 0, str: '완벽!', t, life: 0.5, size: 50 });
+      chips(t, Math.round(9 * h.pow));
+      if (heavy) S.hopAt = t;                            // 묵직한 한 방에 서 있는 못들이 들썩인다
+    } else if (q === 'good') {
+      S.shakeAmp = 7 * h.pow; S.zoom = 0.02 * Math.min(1.5, h.pow); S.dipAmp = 7 * h.pow;
+      sfx(toy ? 'pyong' : 'hitG', toy ? 0.7 : undefined); buzz(10);
+      S.fx.push({ type: 1, under: true, t, life: 0.11, r: 100 * (0.7 + 0.3 * h.pow), rot: Math.random() * 6 }, { type: 4, under: true, t, life: 0.3 },
+        { type: 6, str: toy ? '뿅' : '쿵', t, life: 0.36, size: 76 }, { type: 0, str: '좋아 · ' + side, t, life: 0.5, size: 42 });
+      chips(t, Math.round(4 * h.pow));
+    } else {
+      S.shakeAmp = 3; S.zoom = 0; S.dipAmp = 3;
+      sfx('bad');
+      S.fx.push({ type: 0, str: '삐끗 · ' + side, t, life: 0.5, size: 42 });
+      if (h.crack) wreck(t, h.crack);                    // 무거운 망치로 삐끗하면 판자가 상한다
+    }
+    if (q === 'bad') { breakCombo(t); return; }
+    S.combo++;
+    S.comboAt = t;
+    if (S.combo > S.maxCombo) S.maxCombo = S.combo;
+    if (MILES.indexOf(S.combo) >= 0) { S.fx.push({ type: 2, str: S.combo + ' 콤보!', t, life: 0.8 }); sfx('combo'); }
+  }
+  const grade = (d) => (d <= S.win.perfect ? 'perfect' : d <= S.win.good ? 'good' : d <= S.win.bad ? 'bad' : null);
+
+  /* 눌렀다. t = 누른 순간(0박에서 몇 초) */
+  function press(t) {
+    if (!S || S.done) return;
+    S.presses++;
+    if (S.sm) { smashHit(t); return; }                   // 부수기 모드: 누를 때마다 바닥을 친다
+    const win = S.win;
+    let first = null, best = null, bestD = 9;
+    for (let k = S.lo; k < S.notes.length; k++) {
+      const n = S.notes[k];
+      if (n.q) continue;
+      const d = t - n.hit;
+      if (d < -win.bad) break;
+      const ad = Math.abs(d);
+      if (ad <= win.bad) { if (!first) first = n; if (ad < bestD) { best = n; bestD = ad; } }
+    }
+    // 빠른 못이 이어질 때: 앞 못이 '좋아' 안에 들면 앞 못부터 맞힌 것으로 본다
+    if (first && first !== best && Math.abs(t - first.hit) <= win.good) { best = first; bestD = Math.abs(t - first.hit); }
+    if (best) { judge(best, grade(bestD), t); return; }
+    S.whiffs++;                                          // 헛손질: 맨 판자를 친다
+    S.strike = { t, q: 'whiff', seen: false, at: 0 };
+    S.shakeAt = t; S.shakeAmp = 3; S.zoom = 0; S.dipAt = t; S.dipAmp = 4;
+    S.fx.push({ type: 4, under: true, t, life: 0.25 });
+    if (S.hm.crack) wreck(t, S.hm.crack); else sfx('whiff');
+    if (t >= INTRO * S.spb) breakCombo(t);
+  }
+
+  function advance(t) {
+    while (S.lo < S.notes.length && S.notes[S.lo].q) S.lo++;
+    for (let k = S.lo; k < S.notes.length; k++) {
+      const n = S.notes[k];
+      if (n.q) continue;
+      if (n.hit - t > 1) break;
+      if (S.bot && S.bot !== 'none' && t >= n.hit + n.err) { press(n.hit + n.err); continue; }
+      if (t > n.hit + S.win.bad) judge(n, 'miss', t);
+    }
+    const b = t / S.spb;
+    if (b >= S.end && !S.ended) { S.ended = true; S.fx.push({ type: 2, str: '끝!', t, life: 1.1 }); }
+    if (b >= S.end + OUTRO && !S.done) finish();
+  }
+
+  function finish() {
+    S.done = true;
+    const acc = S.max ? S.score / S.max : 0;
+    S.res = {
+      id: S.stage.id, practice: S.practice, score: S.score, max: S.max, acc, counts: S.counts, maxCombo: S.maxCombo, whiffs: S.whiffs, presses: S.presses,
+      broken: S.broken, unlocked: null, grade: acc >= 0.9 ? 'S' : acc >= 0.6 ? 'A' : 'F'
+    };
+    if (S.virtual) return;
+    if (!S.practice && !S.bot) record();
+    go('result');
+  }
+  /* 기록을 남긴다. 이 스테이지에 처음 합격했으면, 그 합격으로 열리는 망치를 결과 화면에서 알려 준다 */
+  function record() {
+    const acc = S.res.acc, prev = store.best[S.stage.id], had = !!prev && prev.grade !== 'F';
+    if (!prev || acc > prev.acc) { newBest = !!prev; store.best[S.stage.id] = { acc, grade: S.res.grade }; save(); }
+    if (!had && S.res.grade !== 'F') S.res.unlocked = HAMMERS.filter((h) => h.need === S.stage.id)[0] || null;
+  }
+
+  /* ---------- 그리기 도구 ---------- */
+  let V = { rot: false, s: 1, dpr: 1, cw: 0, ox: 0, oy: 0 }, fontKey = '';
+  /* 느린 기기 대비: 플레이 중 화면 간격을 잰다(pace). 계속 느리면 먼저 가장 가볍게(화소 1배, 나뭇결·파편 줄임) 그려 본다.
+   * 그래도 그대로면 기기가 느린 것이 아니라 화면 수가 묶여 있는 것(휴대폰 절전 모드는 초당 30장으로 묶는다)이라 원래 화질로 되돌리고,
+   * 빨라졌으면 중간(1.5배)을 한 번 더 시험해서 버티는 쪽에 자리 잡는다. probe: 0 처음 화질 · 1 가장 가볍게 시험 · 2 중간 시험 · 3 정해짐 */
+  let dprCap = 2, lite = false, avg = 16.7, lastT = 0, slow = 0, seen = 0, probe = 0;
+  function quality(cap, li) { dprCap = cap; lite = li; slow = 0; seen = 0; fit(); }
+  function pace(ms, force) {
+    const dt = ms - lastT;
+    lastT = ms;
+    if (dt <= 0 || dt > 250) return;                     // 멈췄다 돌아온 직후는 세지 않는다
+    avg += (dt - avg) * 0.08;
+    if ((TEST && !force) || probe > 2) return;           // 자동 검증 때는 화질을 건드리지 않는다 (force = 이 장치 자체를 시험할 때)
+    const bad = avg > 26;                                // 초당 38장 아래
+    seen++;
+    if (probe === 0) {
+      slow = bad ? slow + 1 : 0;                         // 느린 화면이 한동안(90장) 이어지면 시험을 시작한다
+      if (slow > 90) { probe = 1; quality(1, true); }
+    } else if (seen > 100) {                             // 바꾼 뒤 100장쯤 지켜보고 정한다
+      if (probe === 1) {
+        if (bad) { probe = 3; quality(2, false); } else { probe = 2; quality(1.5, false); }
+      } else { probe = 3; if (bad) quality(1, true); }
+    }
+  }
+  const sa = document.getElementById('sa');
+  function fit() {
+    const cw = window.innerWidth, ch = window.innerHeight, dpr = Math.min(window.devicePixelRatio || 1, dprCap);   // 화소는 2배까지만: 더 촘촘해 봐야 느려지기만 한다
+    cv.style.width = cw + 'px';
+    cv.style.height = ch + 'px';
+    cv.width = Math.round(cw * dpr);
+    cv.height = Math.round(ch * dpr);
+    layout(store.view === 'port');
+    // 가로 화면인데 휴대폰을 세로로 들고 있으면 90도 돌려 그린다(폰만 눕히면 된다). 세로 화면은 돌리지 않고, 화면이 넓으면 가운데에 세워 그린다
+    const rot = TOUCH && !PORT && ch > cw;
+    // 노치·홈 막대를 피한 안쪽에 맞춘다 (홈 화면에서 연 전체화면에서는 화면 끝까지가 그릴 자리라서 필요하다)
+    const cs = getComputedStyle(sa), it = parseFloat(cs.paddingTop) || 0, ir = parseFloat(cs.paddingRight) || 0, ib = parseFloat(cs.paddingBottom) || 0, il = parseFloat(cs.paddingLeft) || 0;
+    const aw = cw - il - ir, ah = ch - it - ib, vw = rot ? ah : aw, vh = rot ? aw : ah, s = Math.min(vw / W, vh / H);
+    // ox = 그림의 가로축이 시작하는 자리, oy = 세로축이 시작하는 자리. 돌려 그릴 때는 가로축이 화면 위에서 아래로, 세로축이 화면 오른쪽에서 왼쪽으로 간다
+    V = { rot, s, dpr, cw, ox: (rot ? it : il) + (vw - W * s) / 2, oy: (rot ? ir : it) + (vh - H * s) / 2 };
+    fontKey = '';
+    dirty = true;
+  }
+  /* 그리는 좌표(1280×720)를 화면에 맞춘다. 휴대폰을 세로로 들고 있으면 90도 돌려 그려서, 폰만 눕히면 가로 화면이 된다.
+   * (dx, dy) 만큼 흔들고, (cx, cy)를 중심으로 z 배 당긴다 */
+  function view(dx, dy, z, cx, cy) {
+    z = z || 1;
+    const lx = (cx || 0) * (1 - z) + (dx || 0), ly = (cy || 0) * (1 - z) + (dy || 0);
+    const k = V.s * V.dpr * z, x = (V.ox + lx * V.s) * V.dpr, y = (V.oy + ly * V.s) * V.dpr;
+    if (V.rot) g.setTransform(0, k, -k, 0, V.cw * V.dpr - y, x); else g.setTransform(k, 0, 0, k, x, y);
+    g.lineCap = 'round';
+    g.lineJoin = 'round';
+  }
+  function toGame(X, Y) {                                // 화면에서 누른 자리 → 그리는 좌표
+    return V.rot ? { x: (Y - V.ox) / V.s, y: (V.cw - V.oy - X) / V.s } : { x: (X - V.ox) / V.s, y: (Y - V.oy) / V.s };
+  }
+  function clear() { g.setTransform(1, 0, 0, 1, 0, 0); g.fillStyle = PAPER; g.fillRect(0, 0, cv.width, cv.height); }
+  function seg(x1, y1, x2, y2, w, c) { g.strokeStyle = c || INK; g.lineWidth = w; g.beginPath(); g.moveTo(x1, y1); g.lineTo(x2, y2); g.stroke(); }
+  function rr(x, y, w, h, r) {
+    g.beginPath();
+    g.moveTo(x + r, y);
+    g.arcTo(x + w, y, x + w, y + h, r); g.arcTo(x + w, y + h, x, y + h, r); g.arcTo(x, y + h, x, y, r); g.arcTo(x, y, x + w, y, r);
+    g.closePath();
+  }
+  function font(size, weight) {
+    const key = (weight || 800) + ' ' + size + 'px ' + FONT;
+    if (key !== fontKey) { g.font = key; fontKey = key; }
+  }
+  function text(str, x, y, size, align, c, weight) {
+    font(size, weight);
+    g.textAlign = align || 'left';
+    g.fillStyle = c || INK;
+    g.fillText(str, x, y);
+  }
+  /* 흰 테두리를 두른 글자를 (x, y)를 중심으로 sc 배 키우고 rot 만큼 기울여 그린다 */
+  function pop(str, x, y, size, sc, c, weight, rot) {
+    g.save();
+    g.translate(x, y);
+    if (rot) g.rotate(rot);
+    g.scale(sc, sc);
+    font(size, weight || 900);
+    g.textAlign = 'center';
+    g.lineWidth = Math.max(8, size / 5);
+    g.strokeStyle = PAPER;
+    g.strokeText(str, 0, 0);
+    g.fillStyle = c || INK;
+    g.fillText(str, 0, 0);
+    g.restore();
+  }
+  let buttons = [];
+  function btn(x, y, w, h, label, act, o) {
+    o = o || {};
+    buttons.push({ x, y, w, h, act });
+    rr(x, y, w, h, o.r || 20);
+    g.fillStyle = o.fill ? INK : PAPER;
+    g.fill();
+    g.lineWidth = 5;
+    g.strokeStyle = INK;
+    g.stroke();
+    text(label, x + w / 2, y + h / 2 + (o.size || 34) * 0.35, o.size || 34, 'center', o.fill ? PAPER : INK, 800);
+  }
+
+  /* ---------- 그림 ---------- */
+  /* 판자: 화면을 가로지르는 긴 널. b(박)만큼 왼쪽으로 흘러간 모습을 그린다. 결·옹이·이음매·박자 눈금이 같이 흐른다.
+   * marks = 무거운 망치가 낸 금과 부서진 자리 (t 초에 망치 밑에서 생겨 판자와 함께 흘러간다) */
+  function board(b, y, marks, t, spb) {
+    const off = (((b * D) % TILE) + TILE) % TILE;
+    g.fillStyle = PAPER;
+    g.fillRect(-900, y, W + 1800, BH);
+    if (!lite) {                                         // 느린 기기에서는 나뭇결을 생략한다
+      g.strokeStyle = LIGHT; g.lineWidth = 4;
+      g.beginPath();
+      for (let x0 = -off - TILE; x0 < W + 60; x0 += TILE) {
+        for (let k = 0; k < 3; k++) { const yy = y + 28 + k * 30; g.moveTo(x0, yy); g.bezierCurveTo(x0 + TILE * 0.3, yy - 12, x0 + TILE * 0.7, yy + 12, x0 + TILE, yy); }
+        g.moveTo(x0 + 196, y + 58); g.ellipse(x0 + 170, y + 58, 26, 10, 0, 0, 6.2832);
+        g.moveTo(x0 + 574, y + 84); g.ellipse(x0 + 556, y + 84, 18, 7, 0, 0, 6.2832);
+      }
+      g.stroke();
+    }
+    for (let x0 = -off - TILE; x0 < W + 60; x0 += TILE) seg(x0 + TILE * 0.56, y + 6, x0 + TILE * 0.56, y + BH - 6, 3, GRAY);   // 널 이음매
+    // 박자 눈금: 굵은 금이 망치 밑에 오는 순간이 정박이다
+    const k0 = Math.ceil(2 * (b - (SX + 60) / D)), k1 = Math.floor(2 * (b + (W - SX + 60) / D));
+    for (let k = k0; k <= k1; k++) {
+      const x = SX + (k / 2 - b) * D, whole = k % 2 === 0;
+      seg(x, y + BH - (whole ? 30 : 20), x, y + BH - 8, whole ? 6 : 3, whole ? INK : GRAY);
+    }
+    seg(-900, y, W + 900, y, 5);
+    seg(-900, y + BH, W + 900, y + BH, 5);
+    if (marks) for (let k = 0; k < marks.length; k++) wreckArt(SX - ((t - marks[k].t) / spb) * D, y, marks[k]);
+  }
+  function wreckArt(x, y, m) {
+    const p = m.pts;
+    if (m.level > 1) {                                   // 박살 난 자리: 윗면이 뜯겨 나간 구멍, 사방으로 뻗은 금, 삐죽 솟은 나뭇결
+      g.fillStyle = INK;
+      g.beginPath();
+      g.moveTo(x - 74, y - 3);
+      g.lineTo(x - 52 - 10 * p[0], y + 22 + 16 * p[1]); g.lineTo(x - 30, y + 14 + 10 * p[2]); g.lineTo(x - 12 - 8 * p[3], y + 52 + 22 * p[4]);
+      g.lineTo(x + 10, y + 30 + 14 * p[5]); g.lineTo(x + 30 + 8 * p[6], y + 58 + 16 * p[7]); g.lineTo(x + 52, y + 18 + 12 * p[8]); g.lineTo(x + 76, y - 3);
+      g.closePath(); g.fill();
+      g.strokeStyle = INK; g.lineWidth = 4;
+      g.beginPath();
+      g.moveTo(x - 60, y + 30); g.lineTo(x - 104 - 20 * p[1], y + 52 + 20 * p[2]); g.lineTo(x - 128, y + 92);
+      g.moveTo(x + 44, y + 50); g.lineTo(x + 92 + 20 * p[3], y + 64 + 16 * p[4]); g.lineTo(x + 120, y + 104);
+      g.moveTo(x - 6, y + 70); g.lineTo(x + 4 - 16 * p[5], y + 104);
+      g.stroke();
+      g.fillStyle = PAPER; g.lineWidth = 3.5;
+      g.beginPath(); g.moveTo(x - 78, y - 2); g.lineTo(x - 94, y - 26 - 14 * p[6]); g.lineTo(x - 60, y - 2); g.closePath(); g.fill(); g.stroke();
+      g.beginPath(); g.moveTo(x + 60, y - 2); g.lineTo(x + 86 + 8 * p[7], y - 30 - 10 * p[8]); g.lineTo(x + 82, y - 2); g.closePath(); g.fill(); g.stroke();
+    } else {                                             // 금
+      g.strokeStyle = INK; g.lineWidth = 4;
+      g.beginPath();
+      g.moveTo(x - 4, y); g.lineTo(x - 16 - 10 * p[0], y + 22); g.lineTo(x + 4, y + 40 + 10 * p[1]); g.lineTo(x - 10 - 14 * p[2], y + 70); g.lineTo(x + 6, y + 100);
+      g.moveTo(x - 16 - 10 * p[0], y + 22); g.lineTo(x - 44 - 12 * p[3], y + 34);
+      g.moveTo(x + 4, y + 40 + 10 * p[1]); g.lineTo(x + 36 + 12 * p[4], y + 56);
+      g.stroke();
+    }
+  }
+  /* 못. q: 없음(서 있음) / perfect(반듯하게 박힘) / good(기울어 덜 박힘) / bad(휨) / miss(놓쳐서 그대로, 회색).
+   * lift = 판자 위로 떠 있는 높이(손에 들려 있을 때), born = 꽂힌 지 몇 초.
+   * 굵은 선 하나가 아니라 테두리로 그린다: 납작한 대가리, 빛이 한 줄 들어간 몸통, 뾰족한 끝 */
+  function nailShape(h, c, tip) {                        // (0,0)에서 위로 h 만큼 선 못. tip 이면 뾰족한 끝까지 보인다(손에 들려 있을 때)
+    g.fillStyle = PAPER; g.strokeStyle = c; g.lineWidth = 4;
+    if (h > 16) {
+      const b = tip ? -15 : 0;
+      g.beginPath();
+      g.moveTo(-6, -h + 11); g.lineTo(-6, b);
+      if (tip) g.lineTo(0, 0);
+      g.lineTo(6, b); g.lineTo(6, -h + 11);
+      g.closePath(); g.fill(); g.stroke();
+      seg(-1.6, -h + 19, -1.6, b - 6, 2.2, GRAY);                            // 몸통에 비친 빛
+    }
+    g.strokeStyle = c; g.lineWidth = 4;
+    g.beginPath();
+    g.moveTo(-27, -h); g.lineTo(27, -h); g.lineTo(27, -h + 5); g.lineTo(9, -h + 13); g.lineTo(-9, -h + 13); g.lineTo(-27, -h + 5);
+    g.closePath(); g.fill(); g.stroke();
+    seg(-19, -h + 4.6, 19, -h + 4.6, 2, GRAY);                               // 대가리 옆면의 금
+  }
+  function nail(x, y, q, dir, lift, born) {
+    g.save();
+    g.translate(x, y - (lift || 0));
+    if (!q || q === 'miss') {
+      nailShape(NH, q ? GRAY : INK, lift > 0);
+      if (born >= 0 && born < 0.16) { g.strokeStyle = INK; g.lineWidth = 0.5 + 6 * (1 - born / 0.16); g.beginPath(); g.arc(0, -4, 14 + 260 * born, Math.PI, 6.2832); g.stroke(); }
+    } else if (q === 'perfect') {
+      nailShape(13, INK, false);
+      g.strokeStyle = GRAY; g.lineWidth = 3.5;                               // 눌린 자국
+      g.beginPath(); g.moveTo(-46, 10); g.quadraticCurveTo(-40, 20, -26, 22); g.moveTo(46, 10); g.quadraticCurveTo(40, 20, 26, 22); g.stroke();
+    } else if (q === 'good') {
+      g.rotate(0.2 * dir);
+      nailShape(40, INK, false);
+    } else {                                             // 휜 못: 아래 토막은 서 있고 위 토막이 옆으로 꺾였다
+      g.fillStyle = PAPER; g.strokeStyle = INK; g.lineWidth = 4;
+      g.beginPath(); g.rect(-6, -22, 12, 22); g.fill(); g.stroke();
+      g.translate(0, -20);
+      g.rotate(1.05 * dir);
+      nailShape(46, INK, false);
+    }
+    g.restore();
+  }
+  /* 망치들. 자루 끝(HPX, HPY)을 축으로 a 만큼 돈다. a = 0 이면 타격면이 못을 끝까지 박은 자리에 닿는다.
+   * 머리 모양은 [폭, 윗변, 모서리 둥글기]. 타격면은 모두 같은 높이(94)라서 어느 망치로 쳐도 못에 닿는 자리가 같다 */
+  const HEAD = { basic: [120, -96, 16], slim: [80, -96, 12], big: [172, -108, 20], sledge: [146, -156, 14], toy: [128, -104, 30] };
+  function headBox(h) { const s = HEAD[h.id]; rr(400 - s[0] / 2, s[1], s[0], 94 - s[1], s[2]); }
+  function hammerArt(h) {                                // 자루 끝이 (0,0), 자루는 오른쪽으로 뻗고, 머리는 (400, ·)에 있다
+    const id = h.id, s = HEAD[id], x0 = 400 - s[0] / 2, thick = id === 'slim' ? 0.8 : id === 'big' || id === 'sledge' ? 1.18 : 1;
+    seg(0, 0, 352, 0, 44 * thick, INK); seg(0, 0, 352, 0, 30 * thick, PAPER);                // 나무 자루
+    seg(120, -7, 300, -7, 3, LIGHT); seg(150, 6, 330, 6, 3, LIGHT);
+    seg(-4, 0, id === 'sledge' ? 150 : 100, 0, 52 * thick, INK);                             // 손잡이
+    for (let k = 0; k < (id === 'sledge' ? 6 : 4); k++) seg(16 + k * 22, -14 * thick, 16 + k * 22, 14 * thick, 5, PAPER);
+    if (id === 'toy') {                                  // 뿅망치: 주름 잡힌 흰 머리에 검은 마개
+      g.fillStyle = PAPER; headBox(h); g.fill();
+      g.lineWidth = 6; g.strokeStyle = INK; g.stroke();
+      for (let k = 0; k < 4; k++) seg(x0 + 10, -62 + k * 38, x0 + s[0] - 10, -62 + k * 38, 4);
+      g.fillStyle = INK;
+      rr(x0 - 6, s[1] - 4, s[0] + 12, 26, 10); g.fill();
+      rr(x0 - 6, 72, s[0] + 12, 26, 10); g.fill();
+      return;
+    }
+    g.fillStyle = INK;
+    headBox(h); g.fill();
+    if (id === 'basic' || id === 'slim') {               // 장도리 발톱
+      const k = id === 'slim' ? 0.66 : 1;
+      g.beginPath();
+      g.moveTo(400 + 52 * k, -84); g.bezierCurveTo(400 + 52 * k, -170, 400 - 20 * k, -212, 400 - 142 * k, -216);
+      g.bezierCurveTo(400 - 92 * k, -188, 400 - 56 * k, -150, 400 - 50 * k, -84);
+      g.closePath(); g.fill();
+    } else if (id === 'big') {
+      rr(340, s[1] - 22, 120, 36, 12); g.fill();                                             // 머리 위의 뭉툭한 꼭지
+    }
+    g.fillStyle = PAPER;
+    g.fillRect(x0 + 12, 62, s[0] - 24, 8);                                                   // 타격면 테
+    rr(x0 + 18, s[1] + 26, 10, (94 - s[1]) * 0.56, 5); g.fill();                             // 빛
+    if (id === 'big') g.fillRect(x0 + 40, s[1] + 20, s[0] - 52, 8);
+    if (id === 'sledge') { g.fillRect(x0 + 40, s[1] + 20, s[0] - 52, 8); text('5', 412, 0, 84, 'center', PAPER, 900); }
+  }
+  function hammer(a, ghost, h) {
+    h = h || HAMMERS[0];
+    if (ghost) {                                         // 내리치는 순간의 잔상
+      g.fillStyle = LIGHT;
+      for (let k = 1; k <= 3; k++) { g.save(); g.translate(HPX, HPY); g.rotate(lerp(a, UPA, k / 4)); headBox(h); g.fill(); g.restore(); }
+    }
+    g.save();
+    g.translate(HPX, HPY);
+    g.rotate(a);
+    hammerArt(h);
+    g.restore();
+  }
+  /* 손가락 하나: 가운데 선(p)과 지점마다의 반 굵기(w)로, 끝으로 갈수록 가늘어지는 테두리를 만든다.
+   * 뿌리 쪽은 긋지 않아서 손바닥과 이어져 보인다. side(+1 = 진행 방향의 왼쪽, −1 = 오른쪽)가 손등 쪽이고, 그쪽에 마디 주름과 손톱을 그린다 */
+  const HL = 3.4;                                        // 손을 그리는 선 굵기
+  const IW = [15.5, 14.5, 13.5, 12.5, 11.5, 10.5], MW = [15.5, 15.5, 14.5, 13.5, 12.5, 11.5, 10.5], TW = [24, 19, 16.5, 15, 14, 13];   // 검지·중지·엄지의 반 굵기 (뿌리 → 끝)
+  function digit(p, w, side, deep) {
+    const n = w.length, e = n - 1, L = [], R = [];
+    for (let i = 0; i < n; i++) {
+      const a = Math.max(0, i - 1), b = Math.min(e, i + 1);
+      const dx = p[b * 2] - p[a * 2], dy = p[b * 2 + 1] - p[a * 2 + 1], d = Math.sqrt(dx * dx + dy * dy) || 1;
+      const nx = (-dy / d) * w[i], ny = (dx / d) * w[i];
+      L.push(p[i * 2] + nx, p[i * 2 + 1] + ny);
+      R.push(p[i * 2] - nx, p[i * 2 + 1] - ny);
+    }
+    const ax = p[e * 2 - 2], ay = p[e * 2 - 1], bx = p[e * 2], by = p[e * 2 + 1], th = Math.atan2(by - ay, bx - ax);
+    g.beginPath();
+    g.moveTo(L[0], L[1]);
+    for (let i = 1; i < e; i++) g.quadraticCurveTo(L[i * 2], L[i * 2 + 1], (L[i * 2] + L[i * 2 + 2]) / 2, (L[i * 2 + 1] + L[i * 2 + 3]) / 2);
+    g.lineTo(L[e * 2], L[e * 2 + 1]);
+    g.arc(bx, by, w[e], th + 1.5708, th - 1.5708, true);                     // 둥근 손끝
+    for (let i = e - 1; i >= 1; i--) g.quadraticCurveTo(R[i * 2], R[i * 2 + 1], (R[i * 2] + R[i * 2 - 2]) / 2, (R[i * 2 + 1] + R[i * 2 - 1]) / 2);
+    g.lineTo(R[0], R[1]);
+    g.fillStyle = PAPER; g.fill();
+    g.strokeStyle = INK; g.lineWidth = HL; g.stroke();
+    if (!side) return;
+    g.lineWidth = 2.1;
+    g.beginPath();
+    // 손톱: 손끝 등 쪽에 얹힌 판. deep 이 작으면 옆에서 본 얇은 선, 크면 비스듬히 보이는 넓은 손톱(엄지)
+    const ux = Math.cos(th), uy = Math.sin(th), nx = -uy * side, ny = ux * side, r = w[e], in0 = deep || 4.6;
+    const sl = Math.sqrt((bx - ax) * (bx - ax) + (by - ay) * (by - ay)) || 1, len = Math.min(sl, r * 1.3), wc = lerp(r, w[e - 1], len / sl);
+    const cx = bx - ux * len, cy = by - uy * len;
+    g.moveTo(cx + nx * wc, cy + ny * wc);
+    g.quadraticCurveTo(cx + nx * (wc - in0), cy + ny * (wc - in0), cx + ux * len * 0.4 + nx * (wc - in0), cy + uy * len * 0.4 + ny * (wc - in0));
+    g.lineTo(bx + nx * (r - in0), by + ny * (r - in0));
+    g.arc(bx, by, r - in0, th + side * 1.5708, th + side * 0.35, side > 0);
+    g.stroke();
+  }
+  const root = (p, w) => {                               // 손가락 뿌리의 두 끝점 [윗변 x, y, 아랫변 x, y]: 손바닥 선을 여기에 잇는다
+    const dx = p[2] - p[0], dy = p[3] - p[1], d = Math.sqrt(dx * dx + dy * dy) || 1;
+    return [p[0] - dy / d * w[0], p[1] + dx / d * w[0], p[0] + dy / d * w[0], p[1] - dx / d * w[0]];
+  };
+  /* 손: (x, y)는 검지 끝과 엄지 끝이 못대가리를 집는 자리. 옆에서 본 사람 손이다.
+   * 팔은 오른쪽 위에서 내려오고, 검지가 위에서 굽어 내려와 엄지와 맞닿는다. 그 사이로 말아 쥔 손가락이 보인다.
+   * grip 0 = 집음, 1 = 놓으며 손끝을 벌림 */
+  function hand(x, y, grip) {
+    g.save();
+    g.translate(x, y);
+    g.scale(1.2, 1.2);
+    g.rotate(-1.0);                                      // 손끝은 왼쪽 아래를, 팔은 오른쪽 위를 향한다
+    g.translate(-9, 8);                                  // (9, −8) = 검지 끝과 엄지 끝이 맞닿는 자리
+    // 여기부터 좌표: 손끝이 왼쪽, 팔목이 오른쪽. 위쪽이 손등·검지, 아래쪽이 엄지
+    seg(340, -8, 1300, -8, 118, INK);                                        // 소매
+    g.fillStyle = PAPER; g.strokeStyle = INK; g.lineWidth = HL;
+    g.beginPath(); g.moveTo(226, -46); g.lineTo(298, -51); g.lineTo(298, 35); g.lineTo(226, 27); g.closePath(); g.fill(); g.stroke();   // 팔목
+    rr(290, -64, 50, 112, 9); g.fill(); g.stroke();                          // 흰 소맷부리와 단추
+    g.beginPath(); g.arc(315, 31, 5.5, 0, 6.2832); g.stroke();
+    // 손가락 가운데 선: 뿌리 → 마디 → 끝. 손등 마디가 가장 높고, 거기서 손끝으로 완만하게 굽어 내려간다 (o = 놓으며 벌어지는 정도)
+    const o = grip;
+    const ix = [112, -66, 80, -60.5, 50, -54.5, 33 - 3 * o, -43.5 - 4 * o, 17 - 7 * o, -32 - 9 * o, 1 - 12 * o, -15.5 - 16 * o];
+    const md = [152, -55, 118, -50, 86, -46, 58, -39.5, 39 - 2 * o, -28 - 3 * o, 25 - 6 * o, -15 - 8 * o, 15 - 11 * o, -2 - 14 * o];
+    const tb = [128, 30, 92, 26, 62, 22, 37 + o, 17 + 3 * o, 20 + 3 * o, 10.5 + 8 * o, 4 + 6 * o, 4 + 16 * o];
+    const ri = root(ix, IW), rt = root(tb, TW);
+    digit(md, MW, 0);                                                        // 중지: 검지 뒤로 아래쪽만 보인다
+    g.beginPath();                                                           // 손등에서 손바닥까지 (검지 뿌리와 엄지 뿌리 사이를 잇는다)
+    g.moveTo(232, -46); g.bezierCurveTo(200, -62, 150, -88, ri[0], ri[1]);
+    g.lineTo(ri[2], ri[3]); g.bezierCurveTo(ri[2] + 30, ri[3] - 5, rt[0] + 30, rt[1] + 3, rt[0], rt[1]);
+    g.lineTo(rt[2], rt[3]); g.bezierCurveTo(160, 64, 206, 46, 232, 27);
+    g.closePath();
+    g.fillStyle = PAPER; g.fill();
+    g.strokeStyle = INK; g.lineWidth = HL;
+    g.beginPath();
+    g.moveTo(232, -46); g.bezierCurveTo(200, -62, 150, -88, ri[0], ri[1]);  // 손등: 검지 뿌리 마디에서 살짝 솟는다
+    g.moveTo(ri[2], ri[3]); g.bezierCurveTo(ri[2] + 30, ri[3] - 5, rt[0] + 30, rt[1] + 3, rt[0], rt[1]);   // 검지와 엄지 사이의 살: 둥글게 파인다
+    g.moveTo(rt[2], rt[3]); g.bezierCurveTo(160, 64, 206, 46, 232, 27);     // 엄지 두덩
+    g.stroke();
+    digit(ix, IW, 1);                                                        // 검지: 손톱은 옆에서 본 얇은 선
+    digit(tb, TW, -1, 8.5);                                                // 엄지: 보는 사람 쪽에 있어서 맨 위에, 손톱이 넓게 보인다
+    g.restore();
+  }
+
+  /* ---------- 플레이 화면: 한 화면마다 전부 다시 그린다 (그릴 것이 수십 개뿐이다) ---------- */
+  function drawFx(t, under) {
+    for (let k = S.fx.length - 1; k >= 0; k--) {
+      const f = S.fx[k], u = (t - f.t) / f.life;
+      if (u >= 1 || u < 0) { if (under) S.fx.splice(k, 1); continue; }
+      if (!!f.under !== under) continue;
+      if (f.type === 1) {                                // 뾰족한 충격 표시
+        const R = f.r * (0.75 + 0.45 * u), r = R * 0.56;
+        g.beginPath();
+        for (let a = 0; a < 20; a++) { const an = (a / 20) * 6.2832 + f.rot, rad = a % 2 ? r : R, x = SX + Math.cos(an) * rad, y = PY - 36 + Math.sin(an) * rad * 0.8; if (a) g.lineTo(x, y); else g.moveTo(x, y); }
+        g.closePath();
+        g.fillStyle = PAPER; g.fill(); g.lineWidth = 7; g.strokeStyle = INK; g.stroke();
+      } else if (f.type === 5) {                         // 사방으로 뻗는 선
+        g.strokeStyle = INK; g.lineWidth = 4; g.beginPath();
+        for (let a = 0; a < 14; a++) { const an = (a / 14) * 6.2832 + f.rot, cx = Math.cos(an), cy = Math.sin(an) * 0.8, r0 = 190 + 260 * u, r1 = r0 + 150; g.moveTo(SX + cx * r0, PY - 36 + cy * r0); g.lineTo(SX + cx * r1, PY - 36 + cy * r1); }
+        g.stroke();
+      } else if (f.type === 4) {                         // 먼지
+        g.strokeStyle = INK; g.lineWidth = 0.5 + 5 * (1 - u);
+        g.beginPath();
+        g.moveTo(SX - 40 - 80 * u + 10 + 20 * u, PY - 12 - 14 * u); g.arc(SX - 40 - 80 * u, PY - 12 - 14 * u, 10 + 20 * u, 0, 6.2832);
+        g.moveTo(SX + 40 + 80 * u + 10 + 20 * u, PY - 12 - 14 * u); g.arc(SX + 40 + 80 * u, PY - 12 - 14 * u, 10 + 20 * u, 0, 6.2832);
+        g.stroke();
+      } else if (f.type === 3) {                         // 나뭇조각
+        const tt = u * f.life;
+        g.strokeStyle = INK; g.lineWidth = 6;
+        g.beginPath();
+        for (let p = 0; p < f.parts.length; p++) {
+          const q = f.parts[p], x = SX + q.vx * tt, y = PY - 14 + q.vy * tt + 1500 * tt * tt, an = q.a + q.rot * tt, cx = Math.cos(an) * 8, cy = Math.sin(an) * 8;
+          g.moveTo(x - cx, y - cy); g.lineTo(x + cx, y + cy);
+        }
+        g.stroke();
+      } else if (f.type === 7) {                         // 부서져 날아가는 판자 토막
+        const tt = u * f.life;
+        g.fillStyle = PAPER; g.strokeStyle = INK; g.lineWidth = 3.5;
+        for (let p = 0; p < f.parts.length; p++) {
+          const q = f.parts[p];
+          g.save();
+          g.translate(SX + q.vx * tt, PY - 10 + q.vy * tt + 1500 * tt * tt);
+          g.rotate(q.a + q.rot * tt);
+          g.beginPath(); g.rect(-q.w / 2, -q.h / 2, q.w, q.h); g.fill(); g.stroke();
+          g.restore();
+        }
+      } else if (f.type === 8) {                         // 부수기: 부서진 판자의 두 토막이 양옆으로 튕겨 나가며 사라진다
+        const m = S.sm, tt = u * f.life, y = PY + f.wy - m.cam + smashOff(m, t) + PT / 2 - 240 * tt + 1100 * tt * tt;
+        g.globalAlpha = 1 - u;
+        g.fillStyle = PAPER; g.strokeStyle = INK; g.lineWidth = 4;
+        for (let sg = -1; sg <= 1; sg += 2) {
+          g.save();
+          g.translate(SX + sg * (24 + 2600 * tt), y);
+          g.rotate(sg * (0.5 + f.rot) * 2.4 * tt);
+          g.beginPath();                                 // 깨진 쪽 끝은 들쭉날쭉하다
+          g.moveTo(sg * 8, -PT / 2); g.lineTo(sg * 1500, -PT / 2); g.lineTo(sg * 1500, PT / 2); g.lineTo(sg * 20, PT / 2); g.lineTo(sg * -6, 5); g.lineTo(sg * 16, -3);
+          g.closePath(); g.fill(); g.stroke();
+          g.restore();
+        }
+        g.globalAlpha = 1;
+      } else {
+        g.globalAlpha = u < 0.7 ? 1 : (1 - u) / 0.3;
+        const sc = u < 0.16 ? lerp(1.8, 1, u / 0.16) : 1;
+        if (f.type === 6) pop(f.str, SX + (PORT ? 150 : 200), PY - (PORT ? 330 : 196) - 30 * u, f.size * (PORT ? 0.85 : 1), sc, INK, 900, -0.16);     // 쾅!
+        else if (f.type === 0) pop(f.str, SX, PY + 78, f.size, sc, f.c);                             // 판정
+        else pop(f.str, MIDX, PORT ? 236 : 210, PORT ? 80 : 88, sc, f.c);                                                     // 큰 알림
+        g.globalAlpha = 1;
+      }
+    }
+  }
+  function drawPlay(t) {
+    const spb = S.spb, b = t / spb, notes = S.notes, hm = S.hm;
+    let dx = 0, dy = 0, z = 1;
+    const sd = t - S.shakeAt;
+    if (sd >= 0 && sd < 0.2) { const k = (1 - sd / 0.2) * (1 - sd / 0.2); dy = S.shakeAmp * k * Math.cos(sd * 75); dx = 0.45 * S.shakeAmp * k * Math.sin(sd * 100); z = 1 + S.zoom * k; }
+    clear();
+    view(dx, dy, z, SX, PY);
+
+    // 판자: 맞으면 움찔 내려앉는다. 무거운 망치가 낸 자국은 화면 밖으로 흘러가면 잊는다
+    const dd = t - S.dipAt;
+    const dip = dd >= 0 && dd < 0.16 ? S.dipAmp * (1 - dd / 0.16) * Math.cos(dd * 40) : 0;
+    while (S.marks.length && SX - ((t - S.marks[0].t) / spb) * D < -240) S.marks.shift();
+    board(b, PY + dip, S.marks, t, spb);
+    g.setLineDash([9, 9]);                                                   // 칠 자리: 못대가리가 이 동그라미에 겹칠 때 누른다
+    g.strokeStyle = GRAY; g.lineWidth = 4;
+    g.beginPath(); g.arc(SX, PY - NH, 38, 0, 6.2832); g.stroke();
+    g.setLineDash([]);
+
+    // 꽂힌 못들. 5파운드 해머가 제대로 맞으면 서 있는 못들이 들썩인다
+    while (S.ci < notes.length && notes[S.ci].cue <= t) S.ci++;
+    while (S.vis < S.ci && PX - ((t - notes[S.vis].cue) / spb) * D < -90) S.vis++;
+    const hp = t - S.hopAt, hop = hp >= 0 && hp < 0.2 ? 18 * Math.sin((Math.PI * hp) / 0.2) : 0;
+    for (let k = S.vis; k < S.ci; k++) { const n = notes[k]; nail(PX - ((t - n.cue) / spb) * D, PY + dip - (n.q ? 0 : hop), n.q, n.dir, 0, t - n.cue); }
+
+    drawFx(t, true);
+
+    // 망치: 칠 박이 다가오면 더 치켜들고, 누르면 그 화면에서 바로 끝까지 내려간다
+    let a = UPA + 0.03 * Math.abs(Math.sin(Math.PI * b)), ghost = false;
+    for (let k = S.lo; k < notes.length; k++) { const n = notes[k]; if (n.q) continue; const u = (n.hit - t) / spb; if (u > 0 && u < 0.4) a -= 0.16 * (1 - u / 0.4); break; }
+    const sk = S.strike;
+    if (sk) {
+      if (!sk.seen) { sk.seen = true; sk.at = t - sk.t > 0.3 ? -9 : t; }     // 누른 뒤 처음 그리는 화면부터 시간을 잰다. 너무 묵은 것만 버린다
+      const d = t - sk.at;
+      if (d > 0.34 || d < 0) S.strike = null;
+      else if (d < 0.08) { a = DOWNA[sk.q]; ghost = d < 0.045; }
+      else a = lerp(DOWNA[sk.q], a, easeOut((d - 0.08) / 0.26));
+    }
+    hammer(a, ghost, hm);
+
+    // 손: 다음 못을 들고 내려와 꽂고("틱"), 바로 손을 뗀다. 판자가 박살 나면 깜짝 놀라 움츠린다
+    const nx = S.ci < notes.length ? notes[S.ci] : null, pv = S.ci > 0 ? notes[S.ci - 1] : null;
+    const un = nx ? (nx.cue - t) / spb : 9, up = pv ? (t - pv.cue) / spb : 9;
+    let lift = REST, grip = 0;
+    if (un < 0.32) lift = Math.min(lift, REST * (un / 0.32) * (un / 0.32));
+    if (up < 0.22) { lift = Math.min(lift, REST * easeOut(up / 0.22)); grip = 1 - up / 0.22; }
+    const holding = un < 0.6;                                                // 다음 못을 들고 있는가
+    if (sk && sk.q === 'perfect' && sk.seen && t - sk.at < 0.16 && lift > 20) lift += 16 * (1 - (t - sk.at) / 0.16);   // 쾅 소리에 움찔
+    const sc = t - S.scareAt, scared = sc >= 0 && sc < 0.45;
+    if (scared && lift > 20) lift += 64 * Math.sin((Math.PI * sc) / 0.45);
+    if (holding) { nail(PX, PY, null, 1, lift + 2, -1); grip = 0; }
+    const hy = PY - NH + 6 - lift - (holding ? 2 : 0) - (un >= 0.6 && up >= 0.22 ? 12 * Math.abs(Math.sin(Math.PI * b)) : 0);
+    hand(PX, hy, grip);
+    if (scared) pop('!', PX - 84, hy - 96, 96, 1 + 0.5 * (1 - sc / 0.45), INK, 900);
+
+    drawFx(t, false);
+    if (b >= 0 && b < INTRO) {                                               // 하나 둘 셋 넷
+      const k = Math.floor(b), u = b - k;
+      g.globalAlpha = u < 0.7 ? 1 : (1 - u) / 0.3;
+      pop(['하나', '둘', '셋', '넷'][k], MIDX, PORT ? 250 : 300, PORT ? 110 : 130, u < 0.15 ? lerp(1.5, 1, u / 0.15) : 1);
+      g.globalAlpha = 1;
+    }
+
+    // 점수와 콤보 (가운데 위), 스테이지와 안내 (아래)
+    const ty = PORT ? 88 : 64, by = PORT ? PY + BH + 78 : 672;               // 세로 화면은 스테이지 이름과 안내를 판자 바로 밑에 둔다
+    if (S.practice) text('연습', MIDX, ty - 2, 40, 'center', GRAY, 800); else text(String(S.score), MIDX, ty, 46, 'center', INK, 900);
+    if (S.combo >= 2) { const cd = t - S.comboAt; pop(S.combo + ' 콤보', MIDX, ty + 54, 34, cd >= 0 && cd < 0.14 ? 1 + 0.5 * (1 - cd / 0.14) : 1, INK, 800); }
+    if (!S.virtual && (store.mute || !S.audio)) text(store.mute ? '소리 꺼 둠' : '소리 없이 진행 중', 40, by - 32, 22, 'left', GRAY, 700);
+    text(S.stage.name + ' · ' + S.stage.sub, 40, by, 28, 'left', INK, 800);
+    rr(40, by + 14, 220, 14, 7); g.lineWidth = 3; g.strokeStyle = INK; g.stroke();
+    const prog = clamp((b - INTRO) / (S.end - INTRO));
+    if (prog > 0) { g.fillStyle = INK; g.fillRect(44, by + 18, 212 * prog, 6); }
+    const bi = Math.floor((b - INTRO) / 4), cap = S.stage.caps && bi >= 0 && bi < S.bars ? S.stage.caps[bi] : '';
+    if (cap) { if (PORT) text(cap, 360, by + 100, 28, 'center', INK, 700); else text(cap, 660, 688, 30, 'center', INK, 700); }
+    rr(PBX, PBY, 92, 64, 16);                                               // 멈춤 단추
+    g.fillStyle = PAPER; g.fill();
+    g.lineWidth = 4; g.strokeStyle = INK; g.stroke();
+    g.fillStyle = INK; g.fillRect(PBX + 32, PBY + 16, 10, 32); g.fillRect(PBX + 50, PBY + 16, 10, 32);
+    if (SHOWFPS) text(Math.round(1000 / avg) + '장/초 · ' + cv.width + '×' + cv.height + (lite ? ' · 가볍게' : ''), PORT ? W - 30 : 30, PORT ? 56 : 40, 24, PORT ? 'right' : 'left', GRAY, 700);
+  }
+  /* ---------- 부수기 모드: 나무 바닥을 망치로 부수며 내려간다 ----------
+   * 박자와 상관없이 마구 누르는 놀이다. 바닥은 판자를 겹쳐 만들고, 내려갈수록 두꺼워진다(두 층마다 한 겹씩 늘어난다).
+   * 판자 한 장의 단단함은 PLANK 이고 망치마다 한 번에 깎는 힘(HAMMERS 의 smash)이 다르다:
+   *   뿅망치 1 · 좁은 망치 2 · 기본 망치 3 · 큰 망치 4 · 5파운드 해머 6
+   * 그래서 판자 한 장을 부수는 데 뿅망치는 6번, 좁은 망치 3번, 기본 망치 2번, 5파운드 해머는 1번이 든다. 남은 힘은 아래 판자로 넘어간다(큰 망치는 두 장에 3번).
+   * 첫 망치질부터 SMASH_TIME 초 동안 얼마나 깊이 내려가는지 겨루고, 기록은 망치마다 따로 남긴다 */
+  const SMASH = { id: 'smash', name: '부수기', sub: '나무 바닥', smash: true, bpm: 150, tr: 2 };
+  const SMASH_TIME = 30;                                 // 겨루는 시간(초)
+  const PLANK = 6;                                       // 판자 한 장의 단단함
+  const PT = 30;                                         // 판자 한 장의 두께
+  const ROOM = 240;                                      // 바닥과 그 아래 바닥 사이의 높이
+  const layersOf = (f) => 1 + Math.floor(f / 2);         // f 번째(0부터) 바닥의 판자 겹 수: 1, 1, 2, 2, 3, 3, …
+  const smashNote = (h) => {                             // "판자 몇 장에 몇 번"
+    let p = 1;
+    while ((p * PLANK) % h.smash) p++;
+    return p + '장에 ' + (p * PLANK) / h.smash + '번';
+  };
+  const smashBest = () => { const r = store.smash || {}; let b = 0; Object.keys(r).forEach((k) => { if (r[k] > b) b = r[k]; }); return b; };   // 어느 망치로든 가장 깊이 내려간 기록
+  const depthName = (n) => (n > 0 ? '지하 ' + n + '층' : '1층');
+  /* 아직 덜 내려온 거리(px). 판자나 바닥이 부서지면 그만큼 늘었다가 금방 0 으로 줄어든다: 이 값만큼 바닥을 아래에 그려서 "내려가는" 것처럼 보인다 */
+  const smashOff = (m, t) => { const o = m.off * Math.exp(-Math.max(0, t - m.offAt) * 16); return o < 0.5 ? 0 : o; };
+  const chunkParts = (n) => {                            // 사방으로 튀는 판자 토막
+    const parts = [];
+    for (let k = 0; k < n; k++) parts.push({ vx: (Math.random() - 0.5) * 900, vy: -(300 + Math.random() * 560), rot: (Math.random() - 0.5) * 22, a: Math.random() * 3, w: 16 + Math.random() * 26, h: 8 + Math.random() * 10 });
+    return parts;
+  };
+
+  function beginSmash(stage, opt) {
+    opt = opt || {};
+    if (Au.ctx) Au.hush();
+    const audio = !opt.virtual && Au.running;
+    S = {
+      hm: opt.hammer ? rawHammer(opt.hammer) : hammerById(store.hammer), stage, spb: 60 / stage.bpm, practice: false,
+      // floor = 부순 바닥 수(= 지금 깊이), left = 지금 바닥에 남은 판자 수, hp = 맨 위 판자의 남은 단단함, cam = 지금까지 내려온 거리
+      sm: { floor: 0, left: 1, hp: PLANK, start: -1, end: -1, over: false, hits: 0, planks: 0, cam: 0, off: 0, offAt: 0, beep: 3, popAt: -9, next: 0, loop: null },
+      virtual: !!opt.virtual, bot: opt.bot || null, audio, t0: 0, base: 0, frozen: null, paused: false, done: false, ended: false,
+      notes: [], marks: [], win: WIN, bars: 0, end: 0, lo: 0, sched: 0, ci: 0, vis: 0, score: 0, max: 0, combo: 0, maxCombo: 0, comboAt: -9,
+      counts: { perfect: 0, good: 0, bad: 0, miss: 0 }, whiffs: 0, presses: 0, broken: 0, scareAt: -9, hopAt: -9,
+      fx: [], strike: null, shakeAt: -9, shakeAmp: 0, zoom: 0, dipAt: -9, dipAmp: 0, res: null
+    };
+    if (audio) { S.sm.loop = Au.makeLoop(stage.bpm, stage.tr); S.t0 = Au.now(); }   // 반주는 미리 만들어 두고, 첫 망치질에 튼다
+    else if (!opt.virtual) S.base = performance.now() / 1000;
+  }
+
+  /* 망치질 한 번. 힘만큼 맨 위 판자를 깎고, 판자가 부서지면 남은 힘이 아래 판자로 넘어간다. 마지막 판자가 부서지면 아래층으로 떨어진다 */
+  function smashHit(t) {
+    const m = S.sm, h = S.hm, toy = h.id === 'toy', heavy = h.id === 'sledge';
+    if (m.over) return;
+    if (m.start < 0) {                                   // 첫 망치질: 시계가 돌고 반주가 나온다
+      m.start = t;
+      if (S.audio && m.loop) { const at = Au.now() + 0.02; Au.loop(m.loop.buffer, at, at + SMASH_TIME); }
+    }
+    m.hits++;
+    S.strike = { t, q: 'smash', seen: false, at: 0 };
+    S.shakeAt = t;
+    S.dipAt = t;
+    for (let k = S.fx.length - 1; k >= 0; k--) if (S.fx[k].type === 6) S.fx.splice(k, 1);          // 앞 글자가 남아 있으면 지운다
+    let pow = h.smash, planks = 0, fell = false;
+    while (pow > 0) {
+      const d = Math.min(pow, m.hp);
+      m.hp -= d;
+      pow -= d;
+      if (m.hp > 0) break;
+      planks++;                                          // 판자 한 장이 부서졌다: 두 토막이 양옆으로 튕겨 나가고 아래 것이 올라온다
+      m.planks++;
+      S.fx.push({ type: 8, under: true, t, life: 0.3, wy: m.cam, rot: Math.random() - 0.5 });
+      m.left--;
+      m.hp = PLANK;
+      const drop = m.left > 0 ? PT : PT + ROOM;
+      m.off = smashOff(m, t) + drop;
+      m.offAt = t;
+      m.cam += drop;
+      if (m.left === 0) {                                // 바닥이 뚫렸다: 아래층으로 (남은 힘은 버린다)
+        fell = true;
+        m.floor++;
+        m.left = layersOf(m.floor);
+        m.popAt = t;
+        break;
+      }
+    }
+    S.fx.push({ type: 4, under: true, t, life: 0.25 });
+    if (fell) {
+      S.fx.push({ type: 7, t, life: 0.8, parts: chunkParts(lite ? 6 : 11) }, { type: 6, str: '우지끈!', t, life: 0.5, size: 92 },
+        { type: 1, under: true, t, life: 0.13, r: 150, rot: Math.random() * 6 });
+      S.shakeAmp = Math.min(22, 9 + 2.4 * h.smash); S.zoom = 0.04; S.dipAmp = 0;
+      sfx('crack'); sfx(toy ? 'pyong' : heavy ? 'boom' : 'hitP'); buzz(30);
+      if (m.floor % 10 === 0) sfx('combo');              // 열 층마다 딩동
+    } else if (planks) {
+      S.fx.push({ type: 7, t, life: 0.6, parts: chunkParts(lite ? 3 : 5) }, { type: 6, str: '쩍!', t, life: 0.36, size: 70 },
+        { type: 1, under: true, t, life: 0.11, r: 110, rot: Math.random() * 6 });
+      S.shakeAmp = Math.min(16, 5 + 1.6 * h.smash); S.zoom = 0.02; S.dipAmp = 0;
+      sfx('crack', 0.5); sfx(toy ? 'pyong' : 'hitP', 0.8); buzz(12);
+    } else {
+      S.fx.push({ type: 6, str: toy ? '뿅' : '쿵', t, life: 0.25, size: 56 });
+      S.shakeAmp = 2 + 0.8 * h.smash; S.zoom = 0; S.dipAmp = 5;
+      chips(t, 2 + Math.round(h.smash / 2));
+      sfx(toy ? 'pyong' : 'hitG', toy ? 0.7 : undefined);
+    }
+  }
+  function advanceSmash(t) {
+    const m = S.sm;
+    if (S.bot && !m.over) while (m.next <= t) { smashHit(m.next); m.next += 1 / S.bot; }          // 자동으로 치는 손: 1초에 S.bot 번
+    if (m.start >= 0 && !m.over) {
+      const left = SMASH_TIME - (t - m.start);
+      if (m.beep > 0 && left <= m.beep) { m.beep--; sfx('stick'); }                               // 마지막 3초: 딱, 딱, 딱
+      if (left <= 0) { m.over = true; m.end = t; S.ended = true; sfx('end'); }
+    }
+    if (m.over && t - m.end >= 1.8 && !S.done) finishSmash();
+  }
+  function finishSmash() {
+    const m = S.sm;
+    S.done = true;
+    S.res = { smash: true, id: 'smash', practice: false, depth: m.floor, hits: m.hits, planks: m.planks, best: (store.smash || {})[S.hm.id] || 0, fresh: false, unlocked: null };
+    if (S.virtual) return;
+    if (!S.bot) recordSmash();
+    go('result');
+    menuAt += 700;                                       // 마구 누르던 손이 결과 화면의 단추까지 누르지 않게, 조금 더 오래 입력을 흘려보낸다
+  }
+  function recordSmash() {                               // 기록은 망치마다 따로 남긴다
+    const r = S.res, rec = store.smash || (store.smash = {}), prev = rec[S.hm.id] || 0;
+    if (r.depth > prev) { rec[S.hm.id] = r.depth; r.best = r.depth; r.fresh = prev > 0; save(); }
+  }
+
+  /* 바닥 하나: 판자 n 장을 겹쳐 그린다. f = 몇 번째 바닥, j0 = 맨 위 판자가 원래 몇 번째 겹이었나(결·이음매가 판자마다 다르게),
+   * hp = 맨 위 판자의 남은 단단함(줄어들수록 금이 늘어난다), bottom = 화면 맨 아래 */
+  function floorArt(y, f, n, j0, hp, bottom) {
+    const vis = Math.min(n, Math.ceil((bottom - y) / PT));                   // 화면 아래로 벗어난 판자는 그리지 않는다
+    if (vis <= 0) return;
+    g.fillStyle = PAPER;
+    g.fillRect(-900, y, W + 1800, vis * PT);
+    if (!lite) {                                         // 나뭇결
+      g.strokeStyle = LIGHT; g.lineWidth = 3;
+      g.beginPath();
+      for (let i = 0; i < vis; i++) {
+        const yy = y + i * PT + PT * 0.55, sh = ((f * 5 + (j0 + i) * 3) % 7) * 90;
+        for (let x0 = -700 - sh; x0 < W + 700; x0 += 640) { g.moveTo(x0, yy); g.bezierCurveTo(x0 + 190, yy - 7, x0 + 450, yy + 7, x0 + 640, yy); }
+      }
+      g.stroke();
+    }
+    g.strokeStyle = INK; g.lineWidth = 3;
+    g.beginPath();
+    for (let i = 0; i < vis; i++) {
+      const yy = y + i * PT, sh = ((f * 3 + (j0 + i) * 5) % 9) * 71;
+      if (i) { g.moveTo(-900, yy); g.lineTo(W + 900, yy); }                  // 판자와 판자 사이
+      for (let x = -640 + sh; x < W + 640; x += 640) { g.moveTo(x, yy + 4); g.lineTo(x, yy + PT - 4); }   // 판자 이음매
+    }
+    g.stroke();
+    seg(-900, y, W + 900, y, 5);
+    if (vis === n) seg(-900, y + n * PT, W + 900, y + n * PT, 5);
+    if (hp < PLANK) {                                    // 맨 위 판자에 간 금
+      const dmg = 1 - hp / PLANK, cn = dmg > 0.66 ? 3 : dmg > 0.33 ? 2 : 1, s = f * 13 + j0 * 7;
+      g.strokeStyle = INK; g.lineWidth = 3.5;
+      g.beginPath();
+      for (let k = 0; k < cn; k++) {
+        const x = SX + [0, -46, 40][k] + ((s + k * 5) % 5) * 4 - 8, w = 8 + ((s + k * 3) % 4) * 3;
+        g.moveTo(x, y + 2); g.lineTo(x - w, y + PT * 0.4); g.lineTo(x + w * 0.6, y + PT * 0.7); g.lineTo(x - w * 0.3, y + PT - 2);
+      }
+      g.stroke();
+    }
+  }
+  function drawSmash(t) {
+    const m = S.sm, hm = S.hm;
+    let dx = 0, dy = 0, z = 1;
+    const sd = t - S.shakeAt;
+    if (sd >= 0 && sd < 0.2) { const k = (1 - sd / 0.2) * (1 - sd / 0.2); dy = S.shakeAmp * k * Math.cos(sd * 75); dx = 0.45 * S.shakeAmp * k * Math.sin(sd * 100); z = 1 + S.zoom * k; }
+    clear();
+    view(dx, dy, z, SX, PY);
+    const off = smashOff(m, t), dd = t - S.dipAt;
+    const dip = off === 0 && dd >= 0 && dd < 0.14 ? S.dipAmp * (1 - dd / 0.14) * Math.cos(dd * 44) : 0;
+    const bottom = H + V.oy / V.s + 60;                                      // 화면 맨 아래 (위아래 여백까지)
+    if (off > 40 && !lite) {                             // 떨어지는 동안: 세로로 스치는 선
+      g.strokeStyle = LIGHT; g.lineWidth = 5;
+      g.beginPath();
+      for (let k = 0; k < 7; k++) { const x = W * (0.07 + 0.14 * k) + 31 * ((k * 7) % 3), y = 70 + ((k * 131) % 360); g.moveTo(x, y); g.lineTo(x, y + Math.min(260, off * 1.2)); }
+      g.stroke();
+    }
+    // 바닥들: 지금 바닥(남은 판자만)과 그 아래 바닥들
+    let y = PY + off + dip, f = m.floor, n = m.left, j0 = layersOf(f) - n;
+    while (y < bottom) {
+      floorArt(y, f, n, j0, f === m.floor ? m.hp : PLANK, bottom);
+      y += n * PT + ROOM;
+      f++;
+      n = layersOf(f);
+      j0 = 0;
+    }
+    drawFx(t, true);
+
+    // 망치: 누르면 그 화면에서 바로 내려가고, 금방 다시 든다 (마구 눌러도 한 번 한 번이 보이게)
+    let a = UPA + 0.03 * Math.abs(Math.sin(t * 4.2)), ghost = false;
+    if (m.start < 0) a = UPA + 0.07 * Math.sin(t * 5);                       // 시작 전: 치켜들고 까딱까딱
+    const sk = S.strike;
+    if (sk) {
+      if (!sk.seen) { sk.seen = true; sk.at = t - sk.t > 0.3 ? -9 : t; }
+      const d = t - sk.at;
+      if (d > 0.3 || d < 0) S.strike = null;
+      else if (d < 0.04) { a = 0.035; ghost = d < 0.03; }
+      else a = lerp(0.035, a, easeOut((d - 0.04) / 0.26));
+    }
+    hammer(a, ghost, hm);
+    drawFx(t, false);
+
+    // 남은 시간과 지금 깊이 (망치 오른쪽의 빈 자리)
+    const left = m.start < 0 ? SMASH_TIME : m.over ? 0 : Math.max(0, SMASH_TIME - (t - m.start));
+    const cx = PORT ? 540 : 970, ty = PORT ? 100 : 132, hurry = m.start >= 0 && !m.over && left <= 5;
+    pop(String(Math.ceil(left)), cx, ty, PORT ? 60 : 64, hurry ? 1 + 0.3 * (left - Math.floor(left)) : 1, INK, 900);
+    rr(cx - 130, ty + 14, 260, 20, 10);
+    g.fillStyle = PAPER; g.fill(); g.lineWidth = 3; g.strokeStyle = INK; g.stroke();
+    if (left > 0) { g.fillStyle = INK; g.fillRect(cx - 124, ty + 19, (248 * left) / SMASH_TIME, 10); }
+    const pd = t - m.popAt, ps = pd >= 0 && pd < 0.18 ? 1 + 0.35 * (1 - pd / 0.18) : 1, best = (store.smash || {})[hm.id] || 0;
+    if (m.floor > 0) text('지하', cx, ty + 94, 40, 'center', GRAY, 800);
+    pop(m.floor > 0 ? m.floor + '층' : '1층', cx, ty + 204, PORT ? 110 : 120, ps, INK, 900);
+    if (best) text('이 망치 최고 ' + depthName(best), cx, ty + 250, 24, 'center', GRAY, 700);
+    if (m.start < 0) {                                   // 시작 전 안내
+      const py = PY + PT + (PORT ? 150 : 96);
+      pop(TOUCH ? '화면을 마구 눌러요!' : '스페이스를 마구 눌러요!', W / 2, py, PORT ? 46 : 44, 1 + 0.04 * Math.sin(t * 6), INK, 900);
+      pop(SMASH_TIME + '초 동안 얼마나 깊이 내려갈까요?', W / 2, py + 52, 28, 1, GRAY, 700);
+    }
+    if (m.over) { const e = t - m.end; pop('끝!', PORT ? 360 : 560, PORT ? 620 : 400, 170, e < 0.15 ? lerp(1.6, 1, e / 0.15) : 1, INK, 900); }
+
+    // 모드와 망치 이름, 멈춤 단추 (바닥이 화면 아래까지 차서 모두 위쪽에 둔다)
+    const lx = PORT ? 132 : W - 136, al = PORT ? 'left' : 'right', bx = PORT ? PBX : W - 120;
+    text(SMASH.name + ' · ' + hm.name, lx, 66, 24, al, GRAY, 700);
+    if (!S.virtual && (store.mute || !S.audio)) text(store.mute ? '소리 꺼 둠' : '소리 없이 진행 중', PORT ? lx : cx, PORT ? 94 : ty + 284, 20, PORT ? 'left' : 'center', GRAY, 700);
+    rr(bx, 24, 92, 64, 16);
+    g.fillStyle = PAPER; g.fill();
+    g.lineWidth = 4; g.strokeStyle = INK; g.stroke();
+    g.fillStyle = INK; g.fillRect(bx + 32, 40, 10, 32); g.fillRect(bx + 50, 40, 10, 32);
+    if (SHOWFPS) text(Math.round(1000 / avg) + '장/초 · ' + cv.width + '×' + cv.height + (lite ? ' · 가볍게' : ''), PORT ? W - 30 : 30, PORT ? H - 40 : 40, 24, PORT ? 'right' : 'left', GRAY, 700);
+  }
+  function drawSmashResult(r) {
+    const x = W / 2, again = () => startStage(SMASH), hname = S.hm.name;
+    text(SMASH.name + ' · ' + SMASH.sub + ' · ' + hname, x, PORT ? 170 : 90, PORT ? 32 : 36, 'center', GRAY, 800);
+    if (r.depth > 0) {
+      text(depthName(r.depth), x, PORT ? 470 : 290, PORT ? 140 : 170, 'center', INK, 900);
+      text(r.fresh ? '새 기록!' : '까지 내려갔어요', x, PORT ? 552 : 362, 50, 'center', INK, 900);
+    } else text('한 층도 못 부쉈어요', x, PORT ? 500 : 310, PORT ? 64 : 80, 'center', INK, 900);
+    text('부순 판자 ' + r.planks + '장   ·   망치질 ' + r.hits + '번', x, PORT ? 640 : 424, PORT ? 30 : 32, 'center', INK, 700);
+    if (r.best > 0) text(hname + ' 최고 기록: ' + depthName(r.best), x, PORT ? 692 : 468, 28, 'center', GRAY, 700);
+    if (PORT) {
+      btn(130, 800, 460, 92, '다시 하기', again, { fill: true, size: 40 });
+      btn(130, 912, 460, 92, '망치 고르기', () => go('hammers'), { size: 40 });
+      btn(130, 1024, 460, 92, '스테이지', () => go('select'), { size: 40 });
+    } else {
+      btn(160, 560, 300, 92, '다시 하기', again, { fill: true, size: 38 });
+      btn(490, 560, 300, 92, '망치 고르기', () => go('hammers'), { size: 38 });
+      btn(820, 560, 300, 92, '스테이지', () => go('select'), { size: 38 });
+    }
+  }
+
+  const onPause = (p) => {
+    if (S && S.sm && !PORT) return p.x >= W - 130 && p.y <= 98;              // 부수기(가로 화면): 멈춤 단추가 오른쪽 위에 있다
+    return PORT ? p.x <= PBX + 106 && p.y <= PBY + 78 : p.x >= PBX - 10 && p.y >= PBY - 10;
+  };
+
+  /* ---------- 화면 방향과 전체화면 ----------
+   * 화면 방향: 가로 화면(1280×720)과 세로 화면(720×1280) 가운데 고른다. 고른 것은 기기에 저장한다.
+   * 전체화면: 되는 브라우저(안드로이드·PC·아이패드)에서는 단추로 켜고 끈다. 아이폰 사파리는 웹 페이지가 스스로 전체화면이 될 수 없어서
+   * "홈 화면에 추가"로 깔아 여는 방법을 알려 준다 (그렇게 열면 주소창 없이 꽉 찬 화면이 된다) */
+  const IOS = /iP(hone|od|ad)/.test(navigator.userAgent) || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
+  const HELP_IOS = ['아이폰에서 전체화면으로 하려면', '1. 사파리의 공유 단추(네모에 화살표)를 눌러요', '2. "홈 화면에 추가"를 눌러요', '3. 홈 화면에 생긴 "톡쾅"으로 열어요', '그러면 주소창 없이 꽉 찬 화면으로 열려요'];
+  const HELP_ETC = ['이 브라우저는 전체화면이 안 돼요', '브라우저 메뉴에서 "홈 화면에 추가"로 깔면', '주소창 없이 꽉 찬 화면으로 열려요'];
+  const FULLHELP = IOS ? HELP_IOS : HELP_ETC;
+  let modal = null;                                      // 안내 창에 띄울 글(줄 배열). 없으면 null
+  const fsEl = () => document.fullscreenElement || document.webkitFullscreenElement || null;
+  const standalone = () => navigator.standalone === true
+    || !!(window.matchMedia && (window.matchMedia('(display-mode: standalone)').matches || window.matchMedia('(display-mode: fullscreen)').matches));
+  function lockView() {                                  // 전체화면일 때 화면 방향을 고른 쪽으로 묶는다 (되는 기기만: 안드로이드). 안 되면 그대로 둔다
+    try {
+      const o = window.screen && window.screen.orientation;
+      if (o && o.lock) { const p = o.lock(PORT ? 'portrait' : 'landscape'); if (p && p.catch) p.catch(() => null); }
+    } catch (e) { /* 무시 */ }
+  }
+  function toggleFull() {
+    const el = document.documentElement, req = el.requestFullscreen || el.webkitRequestFullscreen;
+    if (fsEl()) { const ex = document.exitFullscreen || document.webkitExitFullscreen; if (ex) ex.call(document); return; }
+    const fail = () => { if (!fsEl()) { modal = FULLHELP; dirty = true; } };
+    if (!req) { fail(); return; }
+    try { const p = req.call(el); if (p && p.catch) p.catch(fail); } catch (e) { fail(); return; }
+    setTimeout(fail, 800);                               // 조용히 아무 일도 안 일어나는 기기도 있다
+  }
+  function setView(v) { store.view = v; save(); fit(); if (fsEl()) lockView(); }
+  const viewBtn = (x, y, w, h, size) => btn(x, y, w, h, PORT ? '가로 화면으로' : '세로 화면으로', () => setView(PORT ? 'land' : 'port'), { size });
+  const fullBtn = (x, y, w, h, size) => {                // 이미 꽉 찬 화면(홈 화면에서 연 앱)에서는 보이지 않는다
+    if (fsEl()) btn(x, y, w, h, '전체화면 끄기', toggleFull, { size });
+    else if (!standalone()) btn(x, y, w, h, '전체화면', toggleFull, { size });
+  };
+  function drawModal() {
+    if (!modal) return;
+    g.globalAlpha = 0.97; g.fillStyle = PAPER; g.fillRect(-900, -900, W + 1800, H + 1800); g.globalAlpha = 1;
+    buttons = [];
+    const x = W / 2, n = modal.length, top = H / 2 - (n * 48 + 130) / 2;
+    for (let i = 0; i < n; i++) text(modal[i], x, top + 44 + i * 48, i ? 28 : 38, 'center', INK, i ? 700 : 900);
+    btn(x - 150, top + 40 + n * 48, 300, 84, '알겠어요', () => { modal = null; }, { fill: true, size: 34 });
+  }
+
+  /* ---------- 메뉴 화면: 바뀔 때만 한 번 그린다. 가로 화면과 세로 화면의 배치가 따로 있다 ---------- */
+  function drawPause() {
+    view(0, 0);
+    g.globalAlpha = 0.9; g.fillStyle = PAPER; g.fillRect(-900, -900, W + 1800, H + 1800); g.globalAlpha = 1;
+    buttons = [];
+    const x = W / 2, y = H / 2;
+    text('잠깐 멈춤', x, y - 144, 64, 'center', INK, 900);
+    btn(x - 200, y - 98, 400, 92, '계속하기', resume, { fill: true, size: 40 });
+    btn(x - 200, y + 18, 400, 92, '처음부터', restart, { size: 40 });
+    btn(x - 200, y + 134, 400, 92, '나가기', quit, { size: 40 });
+  }
+  function drawTitle() {
+    clear(); view(0, 0); buttons = [];
+    const start = TOUCH ? '눌러서 시작' : '시작 (스페이스)';
+    board(0.25, PY);
+    if (PORT) {
+      nail(SX - 160, PY, 'perfect', 1, 0, -1);
+      nail(SX + 10, PY, null, 1, 0, -1);
+      hammer(-0.27, false, HAMMERS[0]);
+      nail(PX + 10, PY, null, 1, 70, -1);
+      hand(PX + 10, PY - NH + 6 - 70, 0);
+      pop('톡쾅', 360, 250, 180, 1, INK, 900);
+      pop('틱 꽂아 주면, 한 박 뒤에 쾅!', 360, 314, 32, 1, INK, 700);
+      btn(130, 980, 460, 100, start, () => go('select'), { fill: true, size: 44 });
+      viewBtn(40, 1116, 310, 76, 28);
+      fullBtn(370, 1116, 310, 76, 28);
+    } else {
+      nail(SX - 230, PY, 'perfect', 1, 0, -1);
+      nail(SX - 110, PY, 'perfect', 1, 0, -1);
+      nail(SX + 10, PY, null, 1, 0, -1);
+      hammer(-0.27, false, HAMMERS[0]);
+      nail(PX + 130, PY, null, 1, 70, -1);
+      hand(PX + 130, PY - NH + 6 - 70, 0);
+      pop('톡쾅', MIDX, 176, 160, 1, INK, 900);
+      pop('틱 꽂아 주면, 한 박 뒤에 쾅!', MIDX, 232, 30, 1, INK, 700);
+      btn(430, 634, 420, 76, start, () => go('select'), { fill: true, size: 40 });
+      viewBtn(40, 640, 230, 64, 26);
+      fullBtn(1010, 640, 230, 64, 26);
+    }
+  }
+  const gradeName = (gr) => (gr === 'S' ? '명품' : gr === 'A' ? '합격' : '다시 도전');
+  const soundNote = () => {                              // 소리가 안 날 때 어디가 문제인지 보이게
+    const stt = Au.state;
+    return store.mute ? '소리를 꺼 두었어요. "소리 꺼짐" 단추를 누르면 켜져요'
+      : stt === 'running' ? '소리 장치: 켜짐 · "소리 시험"을 눌러 보세요'
+        : stt === 'none' ? '소리 장치: 화면을 한 번 누르면 켜져요'
+          : '소리 장치: 멈춤(' + stt + ') · 화면을 한 번 눌러 주세요';
+  };
+  const toggleMute = () => { store.mute = !store.mute; save(); Au.setMute(store.mute); };
+  const nudge = (d) => { store.offset = Math.max(-300, Math.min(300, store.offset + d)); save(); };
+  function drawSelect() {
+    clear(); view(0, 0); buttons = [];
+    // 망치 고르기: 스테이지에 합격할 때마다 새 망치가 열린다
+    const open = HAMMERS.filter(unlocked).length, hname = '망치: ' + hammerById(store.hammer).name;
+    const hnote = open < HAMMERS.length ? '망치 ' + open + ' / ' + HAMMERS.length + ' · 합격하면 더 열려요' : '망치를 모두 모았어요!';
+    const off = (store.offset > 0 ? '+' : '') + store.offset + ' ms';
+    const list = STAGES.concat(SMASH), deep = smashBest();                   // 맨 끝에 부수기 모드 (검은 칸으로 구분한다)
+    if (PORT) {                                          // 세로 화면: 스테이지를 위에서 아래로 늘어놓고, 그 밑에 설정
+      btn(24, 28, 150, 60, '처음으로', () => go('title'), { size: 26 });
+      text('어느 판을 할까요?', 440, 72, 38, 'center', INK, 900);
+      list.forEach((st, k) => {
+        const x = 30, y = 108 + k * 102, w = 660, h = 92, best = store.best[st.id], sm = !!st.smash, fg = sm ? PAPER : INK, sub = sm ? LIGHT : GRAY;
+        rr(x, y, w, h, 22);
+        g.fillStyle = sm ? INK : PAPER; g.fill(); g.lineWidth = 5; g.strokeStyle = INK; g.stroke();
+        text(st.name, x + 28, y + 44, 38, 'left', fg, 900);
+        text(st.sub + ' · ' + (sm ? SMASH_TIME + '초 동안 얼마나 깊이?' : st.bpm + ' BPM'), x + 28, y + 76, 22, 'left', sub, 700);
+        if (sm) text(deep ? depthName(deep) : '기록 없음', x + w - 28, y + 56, deep ? 38 : 26, 'right', deep ? fg : sub, deep ? 900 : 700);
+        else if (st.practice) text('여기부터', x + w - 28, y + 58, 30, 'right', INK, 800);
+        else if (best) { text(Math.floor(best.acc * 100 + 1e-9) + '%', x + w - 28, y + 50, 40, 'right', INK, 900); text(gradeName(best.grade), x + w - 28, y + 78, 20, 'right', GRAY, 700); }
+        else text('기록 없음', x + w - 28, y + 56, 26, 'right', GRAY, 700);
+        buttons.push({ x, y, w, h, act: () => startStage(st) });
+      });
+      btn(30, 726, 660, 80, hname, () => go('hammers'), { fill: true, size: 32 });
+      text(hnote, 360, 836, 22, 'center', GRAY, 700);
+      btn(30, 856, 320, 76, store.mute ? '소리 꺼짐' : '소리 켜짐', toggleMute, { fill: !store.mute, size: 30 });
+      btn(370, 856, 320, 76, '소리 시험', () => Au.at('hitP'), { size: 30 });
+      text(soundNote(), 360, 962, 21, 'center', GRAY, 700);
+      btn(30, 984, 96, 76, '−', () => nudge(-10), { size: 44 });
+      text('박자 보정', 228, 1008, 20, 'center', GRAY, 700);
+      text(off, 228, 1046, 34, 'center', INK, 800);
+      btn(330, 984, 96, 76, '+', () => nudge(10), { size: 44 });
+      text('"늦음"이 자꾸 뜨면 +', 450, 1016, 21, 'left', GRAY, 700);
+      text('"빠름"이 자꾸 뜨면 −', 450, 1046, 21, 'left', GRAY, 700);
+      viewBtn(30, 1086, 320, 76, 28);
+      fullBtn(370, 1086, 320, 76, 28);
+    } else {
+      text('어느 판을 할까요?', 520, 100, 52, 'center', INK, 900);
+      btn(40, 44, 170, 64, '처음으로', () => go('title'), { size: 26 });
+      viewBtn(806, 44, 214, 64, 26);
+      fullBtn(1036, 44, 204, 64, 26);
+      const n = list.length, cw = 180, gap = 16, x0 = (W - (n * cw + (n - 1) * gap)) / 2;
+      list.forEach((st, k) => {
+        const x = x0 + k * (cw + gap), y = 150, best = store.best[st.id], mid = x + cw / 2, sm = !!st.smash, fg = sm ? PAPER : INK, sub = sm ? LIGHT : GRAY;
+        rr(x, y, cw, 300, 22);
+        g.fillStyle = sm ? INK : PAPER; g.fill(); g.lineWidth = 5; g.strokeStyle = INK; g.stroke();
+        text(st.name, mid, y + 70, 42, 'center', fg, 900);
+        text(st.sub, mid, y + 112, 22, 'center', sub, 700);
+        text(sm ? SMASH_TIME + '초 동안' : st.bpm + ' BPM', mid, y + 150, 22, 'center', sub, 700);
+        seg(x + 26, y + 178, x + cw - 26, y + 178, 3, sm ? GRAY : LIGHT);
+        if (sm) {
+          if (deep) { text('지하', mid, y + 218, 24, 'center', sub, 700); text(deep + '층', mid, y + 266, 46, 'center', fg, 900); }
+          else { text('바닥을 부수며', mid, y + 232, 22, 'center', sub, 700); text('내려가요', mid, y + 262, 22, 'center', sub, 700); }
+        } else if (st.practice) text('여기부터', mid, y + 246, 32, 'center', INK, 800);
+        else if (best) { text(Math.floor(best.acc * 100 + 1e-9) + '%', mid, y + 238, 46, 'center', INK, 900); text(gradeName(best.grade), mid, y + 276, 24, 'center', GRAY, 700); }
+        else text('기록 없음', mid, y + 246, 26, 'center', GRAY, 700);
+        buttons.push({ x, y, w: cw, h: 300, act: () => startStage(st) });
+      });
+      btn(60, 520, 190, 80, store.mute ? '소리 꺼짐' : '소리 켜짐', toggleMute, { fill: !store.mute, size: 30 });
+      btn(262, 520, 160, 80, '소리 시험', () => Au.at('hitP'), { size: 28 });
+      text(soundNote(), 60, 664, 22, 'left', GRAY, 700);
+      text('박자 보정', 625, 506, 24, 'center', GRAY, 700);
+      btn(470, 520, 84, 80, '−', () => nudge(-10), { size: 44 });
+      text(off, 625, 574, 36, 'center', INK, 800);
+      btn(696, 520, 84, 80, '+', () => nudge(10), { size: 44 });
+      text('"늦음"이 자꾸 뜨면 +, "빠름"이면 −', 625, 632, 22, 'center', GRAY, 700);
+      btn(830, 520, 390, 80, hname, () => go('hammers'), { fill: true, size: 30 });
+      text(hnote, 1025, 632, 22, 'center', GRAY, 700);
+    }
+    if (waiting) {                                       // 판을 고른 뒤 소리 장치가 켜지기를 기다리는 동안
+      rr(W / 2 - 250, H / 2 - 60, 500, 110, 26); g.fillStyle = INK; g.fill();
+      text('소리 준비 중…', W / 2, H / 2 + 12, 46, 'center', PAPER, 800);
+    }
+  }
+  function drawHammers() {
+    clear(); view(0, 0); buttons = [];
+    const cur = hammerById(store.hammer);
+    const state = (h, on, open) => (on ? '쓰는 중' : open ? '고르기' : stageById(h.need).name + ' 합격 시 열림');
+    if (PORT) {                                          // 세로 화면: 한 줄에 하나씩 (왼쪽에 그림, 오른쪽에 이름과 설명)
+      text('망치 고르기', 360, 84, 46, 'center', INK, 900);
+      HAMMERS.forEach((h, k) => {
+        const x = 30, y = 116 + k * 180, w = 660, hh = 168, open = unlocked(h), on = h === cur;
+        rr(x, y, w, hh, 22);
+        g.fillStyle = PAPER; g.fill(); g.lineWidth = on ? 10 : 5; g.strokeStyle = INK; g.stroke();
+        g.save();
+        g.translate(x + 34, y + 138);
+        g.scale(0.34, 0.34);
+        g.rotate(-0.52);
+        if (!open) g.globalAlpha = 0.22;
+        hammerArt(h);
+        g.restore();
+        g.globalAlpha = 1;
+        text(h.name, x + 232, y + 50, 32, 'left', open ? INK : GRAY, 900);
+        text(h.desc.replace('\n', ' '), x + 232, y + 84, 21, 'left', GRAY, 700);
+        text('부수기: 판자 ' + smashNote(h), x + 232, y + 112, 20, 'left', GRAY, 700);
+        text(state(h, on, open), x + 232, y + 148, on ? 28 : 24, 'left', on || open ? INK : GRAY, 800);
+        if (open) buttons.push({ x, y, w, h: hh, act: () => { store.hammer = h.id; save(); } });
+      });
+      btn(210, 1034, 300, 84, '돌아가기', () => go('select'), { fill: true, size: 36 });
+      return;
+    }
+    text('망치 고르기', 640, 96, 52, 'center', INK, 900);
+    const n = HAMMERS.length, cw = 216, gap = 20, x0 = (W - (n * cw + (n - 1) * gap)) / 2;
+    HAMMERS.forEach((h, k) => {
+      const x = x0 + k * (cw + gap), y = 136, mid = x + cw / 2, open = unlocked(h), on = h === cur;
+      rr(x, y, cw, 410, 22);
+      g.fillStyle = PAPER; g.fill(); g.lineWidth = on ? 10 : 5; g.strokeStyle = INK; g.stroke();
+      g.save();                                          // 작게 그린 망치
+      g.translate(x + 30, y + 200);
+      g.scale(0.37, 0.37);
+      g.rotate(-0.52);
+      if (!open) g.globalAlpha = 0.22;
+      hammerArt(h);
+      g.restore();
+      g.globalAlpha = 1;
+      text(h.name, mid, y + 262, 30, 'center', open ? INK : GRAY, 900);
+      h.desc.split('\n').forEach((ln, i) => text(ln, mid, y + 296 + i * 26, 20, 'center', GRAY, 700));
+      text('부수기: 판자 ' + smashNote(h), mid, y + 352, 18, 'center', GRAY, 700);
+      text(state(h, on, open), mid, y + 388, on ? 28 : open ? 24 : 20, 'center', on || open ? INK : GRAY, 800);
+      if (open) buttons.push({ x, y, w: cw, h: 410, act: () => { store.hammer = h.id; save(); } });
+    });
+    btn(490, 588, 300, 84, '돌아가기', () => go('select'), { fill: true, size: 36 });
+  }
+  function drawResult() {
+    const r = S.res, again = () => startStage(S.stage);
+    clear(); view(0, 0); buttons = [];
+    if (r.smash) { drawSmashResult(r); return; }         // 부수기 모드의 결과
+    const head = S.stage.name + ' · ' + S.stage.sub + ' · ' + S.hm.name, pct = Math.floor(r.acc * 100 + 1e-9) + '%';
+    const made = gradeName(r.grade) + (newBest ? '  ·  새 기록!' : ''), tail = '가장 긴 콤보 ' + r.maxCombo + (r.broken ? '   ·   부순 판자 ' + r.broken : '');
+    if (PORT) {                                          // 세로 화면: 위에서 아래로 한 줄씩
+      text(head, 360, 170, 32, 'center', GRAY, 800);
+      if (r.practice) {
+        text('연습 끝!', 360, 520, 120, 'center', INK, 900);
+        text('이제 1단계부터 해 보세요', 360, 604, 36, 'center', INK, 700);
+      } else {
+        text(pct, 360, 470, 190, 'center', INK, 900);
+        text(made, 360, 552, 50, 'center', INK, 900);
+        text('완벽 ' + r.counts.perfect + '   좋아 ' + r.counts.good, 360, 640, 34, 'center', INK, 700);
+        text('삐끗 ' + r.counts.bad + '   놓침 ' + r.counts.miss, 360, 688, 34, 'center', INK, 700);
+        text(tail, 360, 742, 28, 'center', GRAY, 700);
+      }
+      if (r.unlocked) {                                  // 이번 합격으로 새 망치가 열렸다
+        rr(40, 790, 640, 66, 33); g.fillStyle = INK; g.fill();
+        text('새 망치가 열렸어요: ' + r.unlocked.name + '!', 360, 834, 30, 'center', PAPER, 800);
+        btn(130, 890, 460, 88, '망치 고르기', () => go('hammers'), { fill: true, size: 38 });
+        btn(130, 996, 460, 88, '다시 하기', again, { size: 38 });
+        btn(130, 1102, 460, 88, '스테이지', () => go('select'), { size: 38 });
+      } else {
+        btn(130, 860, 460, 92, '다시 하기', again, { fill: true, size: 40 });
+        btn(130, 976, 460, 92, '스테이지', () => go('select'), { size: 40 });
+      }
+      return;
+    }
+    text(head, 640, 90, 36, 'center', GRAY, 800);
+    if (r.practice) {
+      text('연습 끝!', 640, 300, 130, 'center', INK, 900);
+      text('이제 1단계부터 해 보세요', 640, 380, 38, 'center', INK, 700);
+    } else {
+      text(pct, 640, 280, 180, 'center', INK, 900);
+      text(made, 640, 352, 50, 'center', INK, 900);
+      text('완벽 ' + r.counts.perfect + '   좋아 ' + r.counts.good + '   삐끗 ' + r.counts.bad + '   놓침 ' + r.counts.miss, 640, 416, 32, 'center', INK, 700);
+      text(tail, 640, 458, 28, 'center', GRAY, 700);
+    }
+    if (r.unlocked) {                                    // 이번 합격으로 새 망치가 열렸다
+      rr(330, 482, 620, 62, 31); g.fillStyle = INK; g.fill();
+      text('새 망치가 열렸어요: ' + r.unlocked.name + '!', 640, 525, 32, 'center', PAPER, 800);
+      btn(160, 572, 300, 92, '다시 하기', again, { size: 38 });
+      btn(490, 572, 300, 92, '망치 고르기', () => go('hammers'), { fill: true, size: 38 });
+      btn(820, 572, 300, 92, '스테이지', () => go('select'), { size: 38 });
+    } else {
+      btn(310, 560, 300, 92, '다시 하기', again, { fill: true, size: 40 });
+      btn(670, 560, 300, 92, '스테이지', () => go('select'), { size: 40 });
+    }
+  }
+
+  /* ---------- 화면 넘기기 ---------- */
+  let wake = null;
+  function keepAwake(on) {                               // 플레이 중에 화면이 꺼지지 않게
+    try {
+      if (on && navigator.wakeLock && !wake) navigator.wakeLock.request('screen').then((w) => { wake = w; }, () => {});
+      else if (!on && wake) { wake.release(); wake = null; }
+    } catch (e) { /* 지원하지 않는 기기 */ }
+  }
+  function go(name) {
+    screen = name;
+    dirty = true;
+    menuAt = performance.now();
+    if (name === 'play') buttons = [];                   // 지난 메뉴의 단추가 플레이 중에 남아 있지 않게
+    keepAwake(name === 'play');
+  }
+  let waiting = false;                                   // 소리 장치가 켜지기를 기다리는 중
+  function startStage(st, opt) {
+    let fired = false;
+    const run = () => { if (fired) return; fired = true; waiting = false; begin(st, opt); newBest = false; go('play'); };
+    const c = Au.ctx;
+    if (!c || c.state === 'running') { run(); return; }
+    // 소리 장치가 켜질 때까지 기다렸다가 시작한다 (못박자!와 같은 방식). 끝내 안 켜지면 소리 없이 시작한다
+    waiting = true;
+    dirty = true;
+    c.resume().then(run, run);
+    setTimeout(run, TEST ? 200 : 2500);
+  }
+  function pause() {
+    if (!S || S.paused || S.done) return;
+    S.frozen = now();
+    S.paused = true;
+    if (S.audio) Au.suspend();
+    menuAt = performance.now();                          // 멈춤 단추를 누른 그 클릭이 곧바로 메뉴 단추까지 누르지 않게
+    dirty = true;
+  }
+  function resume() {
+    if (!S || !S.paused) return;
+    if (S.audio) Au.resume(); else S.base = performance.now() / 1000 - S.frozen;
+    S.frozen = null;
+    S.paused = false;
+  }
+  function restart() { const st = S.stage; startStage(st); }
+  function quit() {
+    if (S && S.audio) { Au.hush(); Au.resume(); }
+    S = null;
+    go('select');
+  }
+
+  /* ---------- 입력 ----------
+   * 플레이 중에는 닿는 순간(touchstart)에 바로 판정한다. 메뉴 단추는 클릭(click)으로 누른다:
+   * 클릭은 어느 휴대폰에서나 소리 장치를 켤 수 있는 동작이다(못박자!가 이 방식이었고 아이폰에서 소리가 났다).
+   * 그래서 메뉴에서는 터치를 막지 않고 그대로 두어, 손을 떼면 브라우저가 click 을 만들어 주게 한다. */
+  const where = () => screen + (S && S.paused ? '/p' : '');
+  const stamp = (e) => { const n = performance.now(), ts = e.timeStamp; return ts > 0 && Math.abs(n - ts) < 2000 ? ts : n; };
+  const playing = () => screen === 'play' && !!S && !S.paused && !S.done;
+  function hitAt(X, Y, ts) {
+    if (onPause(toGame(X, Y))) pause(); else press(now() - Math.max(0, performance.now() - ts) / 1000);
+  }
+  function menuTap(X, Y) {
+    if (playing() || waiting || performance.now() - menuAt < 500) return;    // 화면이 막 바뀐 직후의 두드림은 흘려보낸다
+    const p = toGame(X, Y);
+    for (let k = buttons.length - 1; k >= 0; k--) {
+      const b = buttons[k];
+      if (p.x >= b.x && p.x <= b.x + b.w && p.y >= b.y && p.y <= b.y + b.h) { if (Au.running) Au.at('ui'); b.act(); dirty = true; return; }
+    }
+  }
+  cv.addEventListener('touchstart', (e) => {
+    Au.unlock();
+    if (!playing()) return;                              // 메뉴: 막지 않는다 → 손을 떼면 click 이 온다
+    e.preventDefault();                                  // 플레이: 바로 판정하고, 뒤따르는 click 은 만들지 않는다
+    const ts = stamp(e);
+    for (let k = 0; k < e.changedTouches.length; k++) hitAt(e.changedTouches[k].clientX, e.changedTouches[k].clientY, ts);
+  }, { passive: false });
+  cv.addEventListener('touchend', () => Au.unlock());
+  cv.addEventListener('touchmove', (e) => e.preventDefault(), { passive: false });
+  cv.addEventListener('mousedown', (e) => { Au.unlock(); if (playing()) hitAt(e.clientX, e.clientY, stamp(e)); });
+  cv.addEventListener('click', (e) => { Au.unlock(); menuTap(e.clientX, e.clientY); });
+  document.addEventListener('gesturestart', (e) => e.preventDefault());
+  window.addEventListener('keydown', (e) => {
+    if (e.repeat) return;
+    if (modal) { if (e.code === 'Space' || e.code === 'Enter' || e.code === 'Escape') { e.preventDefault(); modal = null; dirty = true; } return; }
+    if (e.code === 'Space' || e.code === 'Enter') {
+      e.preventDefault();
+      Au.unlock();
+      if (screen === 'play' && S && !S.paused) press(now() - Math.max(0, performance.now() - stamp(e)) / 1000);
+      else if (screen === 'play' && S) resume();
+      else if (screen === 'title') go('select');
+      else if (screen === 'result') startStage(S.stage);
+    } else if (e.code === 'Escape' || e.code === 'KeyP') {
+      if (screen === 'play' && S) { if (S.paused) resume(); else pause(); }
+      else if (screen === 'select') go('title');
+      else if (screen === 'result' || screen === 'hammers') go('select');
+    }
+  });
+  document.addEventListener('visibilitychange', () => { if (document.hidden && !TEST && screen === 'play') pause(); });
+  window.addEventListener('resize', fit);
+  window.addEventListener('orientationchange', () => setTimeout(fit, 250));
+  const onFull = () => { fit(); if (fsEl()) lockView(); };                   // 전체화면이 켜지거나 꺼지면 크기를 다시 맞춘다
+  document.addEventListener('fullscreenchange', onFull);
+  document.addEventListener('webkitfullscreenchange', onFull);
+
+  /* ---------- 돌리기 ---------- */
+  const next = TEST ? (fn) => setTimeout(fn, 16) : (fn) => requestAnimationFrame(fn);
+  function frame() {
+    if (screen === 'play' && S) {
+      if (!S.paused) {
+        const t = now();
+        pace(performance.now());
+        if (S.sm) { advanceSmash(t); if (screen === 'play') drawSmash(t); }
+        else { advance(t); if (screen === 'play') { schedule(); drawPlay(t); } }
+      } else if (dirty) { dirty = false; if (S.sm) drawSmash(S.frozen); else drawPlay(S.frozen); drawPause(); }
+    } else if (dirty && screen !== 'demo') {
+      dirty = false;
+      if (screen === 'title') drawTitle(); else if (screen === 'select') drawSelect(); else if (screen === 'hammers') drawHammers();
+      else if (S && S.res) drawResult(); else { screen = 'select'; drawSelect(); }
+      drawModal();
+    }
+    next(frame);
+  }
+  fit();
+  frame();
+
+  /* ---------- 자동 검증과 손보기용 ---------- */
+  window.TK = {
+    /* 화면·소리 없이 계산으로만 한 판. until(박)을 주면 그 장면에서 멈춰 화면에 그려 둔다 */
+    sim(id, bot, until, hammer) {                                            // hammer 를 주면 아직 안 열린 망치로도 돌려 볼 수 있다
+      begin(stageById(id), { virtual: true, bot: bot || (id === 'smash' ? 6 : 'perfect'), hammer });
+      for (let t = 0; !S.done; t += 0.004) {
+        if (S.sm) {                                                          // 부수기 모드: bot = 1초에 치는 횟수, until = 초
+          advanceSmash(t);
+          if (until != null && t >= until) { S.frozen = t; go('play'); return { sec: +t.toFixed(2), depth: S.sm.floor, left: S.sm.left, hp: S.sm.hp, hits: S.sm.hits }; }
+          continue;
+        }
+        advance(t);
+        if (until != null && t / S.spb >= until) { S.frozen = t; go('play'); return { beat: +(t / S.spb).toFixed(2), score: S.score, combo: S.combo }; }
+      }
+      return S.res;
+    },
+    run(id, bot) { startStage(stageById(id), { bot: bot || null }); },      // 실제 시간으로 한 판 (bot 을 주면 자동으로 친다)
+    clear(id, bot, hammer) {                                                 // 사람이 한 판을 마친 것처럼: 기록을 남기고 결과 화면까지 간다
+      this.sim(id, bot, null, hammer);
+      newBest = false;
+      if (S.sm) recordSmash(); else if (!S.practice) record();
+      go('result');
+      return S.res;
+    },
+    perf(n) {                                                                // 한 화면을 그리는 데 걸리는 시간(ms)
+      n = n || 300;
+      const base = S.frozen != null ? S.frozen : now(), t0 = performance.now();
+      for (let k = 0; k < n; k++) { if (S.sm) drawSmash(base + k * 0.004); else drawPlay(base + k * 0.004); }
+      const ms = (performance.now() - t0) / n;
+      S.ci = S.vis = 0;                                                      // 앞으로 감아 둔 것을 되돌린다
+      return +ms.toFixed(4);
+    },
+    pace(dt, n) {                                                            // 화면 간격이 dt(ms)인 화면이 n 장 이어진 것처럼: 화질 자동 조절 시험용
+      for (let k = 0; k < n; k++) pace(lastT + dt, true);
+      return { cap: dprCap, lite, probe, fps: Math.round(1000 / avg), size: cv.width + 'x' + cv.height };
+    },
+    setView(v) { setView(v); return { port: PORT, W, H, SX, PX, D, PY, rot: V.rot, s: +V.s.toFixed(4), ox: +V.ox.toFixed(1), oy: +V.oy.toFixed(1) }; },   // 'land' | 'port'
+    help(ios) { modal = ios ? HELP_IOS : FULLHELP; dirty = true; },          // 전체화면 안내 창 띄우기 (ios = 아이폰용 글로)
+    full: toggleFull,
+    go, pause, resume, store, save, STAGES, HAMMERS,
+    demo(k, grip, hammerId) {                                                // 그림 점검용: 손과 못(또는 망치)을 크게 그려 둔다
+      screen = 'demo';
+      clear(); view(0, 0);
+      g.save();
+      g.translate(W / 2, PORT ? 900 : 640); g.scale(k || 2, k || 2);
+      if (hammerId) { g.translate(-200 - HPX, -40 - HPY); hammer(-0.3, false, rawHammer(hammerId)); }
+      else { nail(0, 0, null, 1, 30, -1); hand(0, -30 - NH + 6, grip || 0); }
+      g.restore();
+    },
+    audio() { return Au.info(); },
+    level() { return Au.level(); },
+    get audioState() { return Au.state; },
+    get screen() { return where(); },
+    get state() {
+      return S ? { beat: +(now() / S.spb).toFixed(2), audio: S.audio, score: S.score, max: S.max, combo: S.combo, counts: S.counts, presses: S.presses, whiffs: S.whiffs, done: S.done, paused: S.paused, fx: S.fx.length } : null;
+    },
+    get view() { return V; }
+  };
+})();
+</script>
+</body>
+</html>

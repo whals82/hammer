@@ -1,0 +1,45 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
+<title>못박자!</title>
+<meta name="description" content="똑똑 듣고, 쾅쾅 박는 리듬 공방. 박자에 맞춰 못을 박는 원버튼 리듬게임.">
+<meta name="theme-color" content="#2F6BFF">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="못박자!">
+<link rel="manifest" href="manifest.json">
+<link rel="icon" type="image/png" sizes="192x192" href="icons/icon-192.png">
+<link rel="apple-touch-icon" href="icons/apple-touch-icon.png">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Jua&display=swap" rel="stylesheet">
+<!-- 파일을 고치면 아래 ?v= 숫자와 sw.js 의 CACHE 번호를 함께 올린다. 그래야 기기에 남은 예전 파일과 섞이지 않는다 -->
+<link rel="stylesheet" href="style.css?v=8">
+</head>
+<body>
+<div id="app">
+  <div id="frame">
+    <!-- 배경은 #stage-bg 에 한 번만 그리고, 움직이는 것만 #stage 에 둔다. 흔들기는 #world 를 통째로 옮긴다 -->
+    <div id="world">
+      <svg id="stage-bg" xmlns="http://www.w3.org/2000/svg" viewBox="-40 -40 1360 800" width="1360" height="800"></svg>
+      <svg id="stage-lines" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 2800 720" width="1400" height="360"></svg>
+      <svg id="stage" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1280 720" width="1280" height="720"></svg>
+    </div>
+    <div id="flash"></div>
+    <div id="overlay"></div>
+  </div>
+</div>
+<!-- 휴대폰을 세로로 들었을 때 -->
+<div id="rotate"><div class="phone"></div><p>휴대폰을 가로로 돌려 주세요</p></div>
+<script src="js/art.js?v=8"></script>
+<script src="js/audio.js?v=8"></script>
+<script src="js/charts.js?v=8"></script>
+<script src="js/game.js?v=8"></script>
+<script src="js/game2.js?v=8"></script>
+<script src="js/ui.js?v=8"></script>
+<script src="js/main.js?v=8"></script>
+</body>
+</html>

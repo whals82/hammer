@@ -1,0 +1,20 @@
+{
+  "name": "못박자!",
+  "short_name": "못박자!",
+  "description": "똑똑 듣고, 쾅쾅 박는 리듬 공방. 박자에 맞춰 못을 박는 원버튼 리듬게임.",
+  "lang": "ko",
+  "start_url": "./index.html",
+  "scope": "./",
+  "id": "motbakja",
+  "display": "fullscreen",
+  "display_override": ["fullscreen", "standalone"],
+  "orientation": "landscape",
+  "background_color": "#16213E",
+  "theme_color": "#2F6BFF",
+  "categories": ["games"],
+  "icons": [
+    { "src": "icons/icon-192.png", "sizes": "192x192", "type": "image/png", "purpose": "any" },
+    { "src": "icons/icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "any" },
+    { "src": "icons/icon-maskable-512.png", "sizes": "512x512", "type": "image/png", "purpose": "maskable" }
+  ]
+}

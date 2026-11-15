@@ -1,0 +1,204 @@
+/* 못박자! — 화면 틀과 겹쳐 띄우는 창
+ * 게임 화면은 1280x720 좌표로 만들고, #frame 을 통째로 늘이거나 줄여 창에 맞춘다. */
+
+@font-face {
+  font-family: 'MBHeavy';
+  src: local('Noto Sans KR Black'), local('NotoSansKR-Black'), local('Malgun Gothic Bold'), local('MalgunGothicBold');
+}
+
+* { box-sizing: border-box; }
+
+html, body {
+  margin: 0;
+  height: 100%;
+  background: #0E1730;
+  overflow: hidden;
+  overscroll-behavior: none;
+}
+
+body {
+  font-family: Jua, MBHeavy, 'Malgun Gothic', sans-serif;
+  color: #16213E;
+  -webkit-user-select: none;
+  user-select: none;
+  touch-action: none;
+  -webkit-tap-highlight-color: transparent;
+}
+
+/* 노치와 둥근 모서리를 피한 영역. 이 안에서 #frame 을 가운데에 맞춘다 */
+#app {
+  position: fixed;
+  top: env(safe-area-inset-top, 0px);
+  right: env(safe-area-inset-right, 0px);
+  bottom: env(safe-area-inset-bottom, 0px);
+  left: env(safe-area-inset-left, 0px);
+}
+
+#frame {
+  position: absolute;
+  left: 0;
+  top: 0;
+  width: 1280px;
+  height: 720px;
+  transform-origin: 0 0;
+  overflow: hidden;
+  background: #2F6BFF;
+}
+
+/* 휴대폰을 세로로 들었을 때의 안내 */
+#rotate {
+  display: none;
+  position: fixed;
+  left: 0;
+  top: 0;
+  width: 100%;
+  height: 100%;
+  z-index: 10;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 22px;
+  background: #16213E;
+  color: #fff;
+  font-size: 24px;
+  text-align: center;
+}
+#rotate p { margin: 0; }
+#rotate .phone {
+  width: 64px;
+  height: 108px;
+  border: 6px solid #fff;
+  border-radius: 14px;
+  animation: mb-rotate 1.8s ease-in-out infinite;
+}
+@keyframes mb-rotate {
+  0%, 20% { transform: rotate(0deg); }
+  60%, 100% { transform: rotate(90deg); }
+}
+/* 세로로 든 휴대폰에서는 안내 대신 게임을 90도 돌려 그린다 (js/main.js 의 fit) */
+
+/* 층마다 따로 합성되게 해서, 흔들기·섬광·속도선이 화면을 다시 그리지 않게 한다 (휴대폰 성능) */
+#world { position: absolute; left: 0; top: 0; width: 1280px; height: 720px; transform-origin: 640px 450px; will-change: transform; }
+#stage-bg, #stage-lines, #stage { position: absolute; left: 0; top: 0; display: block; }
+/* 배경은 사방 40px 더 크게 그려서 흔들려도 가장자리가 비지 않는다. 속도선은 절반 크기로 그려 두 배로 늘려 쓴다 (크기는 js/game.js 의 Layers 가 정한다) */
+#stage-bg { left: -40px; top: -40px; will-change: transform; }
+#stage-lines { transform-origin: 0 0; opacity: 0; pointer-events: none; will-change: transform, opacity; }
+#flash { position: absolute; left: 0; top: 0; width: 100%; height: 100%; background: #fff; opacity: 0; pointer-events: none; will-change: opacity; }
+#stage text { pointer-events: none; }
+.sbtn { cursor: pointer; }
+.sbtn:hover { filter: brightness(1.06); }
+
+#overlay { position: absolute; left: 0; top: 0; width: 100%; height: 100%; pointer-events: none; }
+#overlay > * { pointer-events: auto; }
+
+/* ---------- 스테이지 고르기 ---------- */
+.screen { position: absolute; left: 0; top: 0; width: 100%; height: 100%; display: flex; flex-direction: column; align-items: center; }
+
+.select h1 {
+  margin: 18px 0 12px;
+  font-size: 42px;
+  font-weight: 400;
+  color: #fff;
+  text-shadow: 4px 0 0 #16213E, -4px 0 0 #16213E, 0 4px 0 #16213E, 0 -4px 0 #16213E,
+    3px 3px 0 #16213E, -3px 3px 0 #16213E, 3px -3px 0 #16213E, -3px -3px 0 #16213E, 0 8px 0 rgba(14, 23, 48, .35);
+}
+
+/* 게임이 늘어나도 한 화면에 보이도록 네 칸씩 두 줄로 놓는다 */
+.cards { display: grid; grid-template-columns: repeat(4, 250px); gap: 16px 24px; }
+
+.card {
+  position: relative;
+  width: 250px;
+  height: 262px;
+  padding: 10px 12px 12px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  font: inherit;
+  color: #16213E;
+  background: #F4F7FC;
+  border: 5px solid #16213E;
+  border-radius: 30px;
+  box-shadow: 0 8px 0 rgba(22, 33, 62, .3);
+  cursor: pointer;
+  transition: transform .08s ease-out;
+}
+.card:hover, .card:focus-visible {
+  outline: none;
+  transform: translateY(-8px);
+  background: #fff;
+  box-shadow: 0 16px 0 rgba(22, 33, 62, .3), 0 0 0 7px #FFCB3D;
+}
+.card.locked { filter: grayscale(1); opacity: .62; cursor: not-allowed; transform: none; box-shadow: 0 8px 0 rgba(22, 33, 62, .3); }
+.card .no {
+  position: absolute;
+  left: 12px;
+  top: 12px;
+  z-index: 1;
+  padding: 1px 14px 0;
+  font-size: 24px;
+  background: #FFCB3D;
+  border: 4px solid #16213E;
+  border-radius: 999px;
+}
+.card .art { width: 132px; height: 122px; margin-top: 14px; padding: 8px; background: #DCE9FF; border-radius: 20px; }
+.card .art svg { width: 100%; height: 100%; display: block; }
+.card .name { margin-top: 6px; font-size: 26px; }
+.card .meta { font-size: 16px; color: #5B6B8C; }
+.card .best { margin-top: auto; padding: 2px 12px; font-size: 16px; background: #DCE9FF; border-radius: 999px; white-space: nowrap; }
+
+.row { display: flex; gap: 18px; margin-top: 14px; }
+.row.center { justify-content: center; }
+.col { display: flex; flex-direction: column; gap: 14px; align-items: stretch; }
+
+.btn {
+  font: inherit;
+  font-size: 26px;
+  color: #16213E;
+  padding: 8px 30px;
+  background: #fff;
+  border: 4.5px solid #16213E;
+  border-radius: 999px;
+  box-shadow: 0 6px 0 rgba(22, 33, 62, .28);
+  cursor: pointer;
+}
+.btn.primary { background: #FFCB3D; }
+.btn.sm { font-size: 22px; padding: 4px 16px; box-shadow: 0 4px 0 rgba(22, 33, 62, .28); }
+.btn:hover, .btn:focus-visible { outline: none; transform: translateY(-2px); box-shadow: 0 8px 0 rgba(22, 33, 62, .28), 0 0 0 5px rgba(255, 203, 61, .9); }
+.btn:disabled { opacity: .45; cursor: default; transform: none; box-shadow: 0 6px 0 rgba(22, 33, 62, .28); }
+
+/* ---------- 겹쳐 띄우는 창 ---------- */
+.modal {
+  position: absolute;
+  left: 0;
+  top: 0;
+  width: 100%;
+  height: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(14, 23, 48, .62);
+}
+.panel {
+  width: 660px;
+  padding: 26px 38px 30px;
+  background: #F4F7FC;
+  border: 6px solid #16213E;
+  border-radius: 34px;
+  box-shadow: 0 12px 0 rgba(14, 23, 48, .4);
+}
+.panel.narrow { width: 400px; }
+.panel h2 { margin: 0 0 18px; font-size: 40px; font-weight: 400; text-align: center; }
+
+.field { display: flex; align-items: center; gap: 14px; margin: 14px 0; font-size: 26px; }
+.field > span { width: 96px; flex: none; }
+.field input[type=range] { flex: 1; height: 30px; accent-color: #2F6BFF; cursor: pointer; }
+.field b { width: 96px; flex: none; text-align: center; font-weight: 400; }
+
+.note { margin: 10px 0 0; font-size: 19px; line-height: 1.5; color: #5B6B8C; }
+.note.big { font-size: 23px; color: #16213E; }
+.note.center { text-align: center; }
+
+.dots { display: flex; gap: 10px; justify-content: center; margin: 22px 0 8px; }
+.dots i { width: 28px; height: 28px; background: #fff; border: 4px solid #16213E; border-radius: 50%; }
+.dots i.on { background: #FFCB3D; }
