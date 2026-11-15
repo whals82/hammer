@@ -48,7 +48,7 @@ canvas { position: absolute; left: 0; top: 0; display: block; touch-action: none
   /* 고정 주소(깃허브 페이지)에서는 브라우저가 예전 파일을 10분쯤 기억할 수 있다. 그래서 열릴 때 version.txt 를 새로 받아 보고,
    * 지금 파일(BUILD)보다 새 판이 올라와 있으면 주소 뒤에 ?v=새번호 를 붙여 한 번 다시 연다.
    * BUILD 는 올릴 때 tools/deploy.py 가 채운다. 내 컴퓨터에서 열 때는 'dev' 그대로라 아무 일도 하지 않는다 */
-  const BUILD = '20261115-182536';
+  const BUILD = '20261115-182757';
   if (BUILD !== 'dev' && !TEST && window.fetch) {
     fetch('version.txt?' + Date.now(), { cache: 'no-store' }).then((r) => (r.ok ? r.text() : '')).then((v) => {
       v = v.trim();
@@ -1412,6 +1412,7 @@ canvas { position: absolute; left: 0; top: 0; display: block; touch-action: none
       btn(830, 520, 390, 80, hname, () => go('hammers'), { fill: true, size: 30 });
       text(hnote, 1025, 632, 22, 'center', GRAY, 700);
     }
+    if (BUILD !== 'dev') text('판 ' + BUILD, W - 30, H - 14, 16, 'right', LIGHT, 700);   // 고정 주소에 올린 판 번호 (어느 판을 보고 있는지 알 수 있게)
     if (waiting) {                                       // 판을 고른 뒤 소리 장치가 켜지기를 기다리는 동안
       rr(W / 2 - 250, H / 2 - 60, 500, 110, 26); g.fillStyle = INK; g.fill();
       text('소리 준비 중…', W / 2, H / 2 + 12, 46, 'center', PAPER, 800);
@@ -1679,6 +1680,7 @@ canvas { position: absolute; left: 0; top: 0; display: block; touch-action: none
     setView(v) { setView(v); return { port: PORT, W, H, SX, PX, D, PY, rot: V.rot, s: +V.s.toFixed(4), ox: +V.ox.toFixed(1), oy: +V.oy.toFixed(1) }; },   // 'land' | 'port'
     help(ios) { modal = ios ? HELP_IOS : FULLHELP; dirty = true; },          // 전체화면 안내 창 띄우기 (ios = 아이폰용 글로)
     full: toggleFull,
+    build: BUILD,                                                            // 올린 판 번호 ('dev' = 내 컴퓨터에서 연 것)
     go, pause, resume, store, save, STAGES, HAMMERS,
     demo(k, grip, hammerId) {                                                // 그림 점검용: 손과 못(또는 망치)을 크게 그려 둔다
       screen = 'demo';
